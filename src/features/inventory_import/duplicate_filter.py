@@ -12,6 +12,7 @@ import numpy as np
 from src.scanner.window_capture import crop_window_border_from_image
 from src.features.discard.scan_session import attach_scan_index_from_filename
 from src.features.scanning.naming import raw_drive_index_from_name
+from src.utils.image_io import imread_unicode
 
 
 def image_fingerprint(image_path: str):
