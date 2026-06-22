@@ -31,16 +31,25 @@ try:
 except Exception:  # pragma: no cover - optional at import time
     vg = None
 
-BUTTON_MAP = {
-    "DPAD_LEFT": "XUSB_BUTTON_DPAD_LEFT",
-    "DPAD_RIGHT": "XUSB_BUTTON_DPAD_RIGHT",
-    "DPAD_UP": "XUSB_BUTTON_DPAD_UP",
-    "DPAD_DOWN": "XUSB_BUTTON_DPAD_DOWN",
-    "A": "XUSB_BUTTON_A",
-    "B": "XUSB_BUTTON_B",
-    "X": "XUSB_BUTTON_X",
-    "Y": "XUSB_BUTTON_Y",
+BUTTON_ALIASES: dict[str, tuple[str, ...]] = {
+    "DPAD_LEFT": ("XUSB_GAMEPAD_DPAD_LEFT", "XUSB_BUTTON_DPAD_LEFT"),
+    "DPAD_RIGHT": ("XUSB_GAMEPAD_DPAD_RIGHT", "XUSB_BUTTON_DPAD_RIGHT"),
+    "DPAD_UP": ("XUSB_GAMEPAD_DPAD_UP", "XUSB_BUTTON_DPAD_UP"),
+    "DPAD_DOWN": ("XUSB_GAMEPAD_DPAD_DOWN", "XUSB_BUTTON_DPAD_DOWN"),
+    "A": ("XUSB_GAMEPAD_A", "XUSB_BUTTON_A"),
+    "B": ("XUSB_GAMEPAD_B", "XUSB_BUTTON_B"),
+    "X": ("XUSB_GAMEPAD_X", "XUSB_BUTTON_X"),
+    "Y": ("XUSB_GAMEPAD_Y", "XUSB_BUTTON_Y"),
 }
+
+
+def _resolve_xusb_button(button_name: str):
+    if vg is None:
+        return None
+    for attr in BUTTON_ALIASES.get(button_name.upper().strip(), ()):
+        if hasattr(vg.XUSB_BUTTON, attr):
+            return getattr(vg.XUSB_BUTTON, attr)
+    return None
 
 
 @dataclass
@@ -104,10 +113,9 @@ class MarkingExecutor:
     def _press_button(self, button_name: str, hold_ms: int = 80) -> None:
         if vg is None or not self.scanner:
             raise RuntimeError("虚拟手柄不可用")
-        attr = BUTTON_MAP.get(button_name.upper())
-        if not attr or not hasattr(vg.XUSB_BUTTON, attr):
+        button = _resolve_xusb_button(button_name)
+        if button is None:
             raise ValueError(f"未知按键: {button_name}")
-        button = getattr(vg.XUSB_BUTTON, attr)
         self.scanner.gamepad.press_button(button)
         self.scanner.gamepad.update()
         time.sleep(max(0.01, hold_ms / 1000.0))

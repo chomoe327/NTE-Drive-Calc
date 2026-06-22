@@ -291,6 +291,23 @@ class GridNavigationTest(unittest.TestCase):
             self.assertEqual(landed, start, f"{start}->{end} 往返后应回到第 {start} 格")
 
 
+class MarkingExecutorButtonTest(unittest.TestCase):
+    def test_resolve_xusb_button_prefers_vgamepad_names(self):
+        from src.features.discard import executor as marking_executor
+
+        fake_button = SimpleNamespace(
+            XUSB_GAMEPAD_DPAD_LEFT=4,
+            XUSB_GAMEPAD_DPAD_RIGHT=8,
+            XUSB_GAMEPAD_A=0x1000,
+        )
+        fake_vg = SimpleNamespace(XUSB_BUTTON=fake_button)
+        with patch.object(marking_executor, "vg", fake_vg):
+            self.assertEqual(marking_executor._resolve_xusb_button("DPAD_LEFT"), 4)
+            self.assertEqual(marking_executor._resolve_xusb_button("DPAD_RIGHT"), 8)
+            self.assertEqual(marking_executor._resolve_xusb_button("A"), 0x1000)
+            self.assertIsNone(marking_executor._resolve_xusb_button("UNKNOWN"))
+
+
 class MarkingExecutorTest(unittest.TestCase):
     @patch("src.features.discard.executor.BatchProcessor")
     @patch("src.features.discard.executor.mss.mss")
