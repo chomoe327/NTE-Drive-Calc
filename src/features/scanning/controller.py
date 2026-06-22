@@ -225,6 +225,9 @@ def _on_vision_progress(self,current,total,filename):
 
 def _on_vision_done(self,stats):
     stats=stats or {}
+    if getattr(self,"_marking_pipeline",False):
+        if self._marking_on_pipeline_vision_done(stats):
+            return
     self._pending_archive_paths=[]
     logger.info("视觉解析线程完成，准备启动分配计算...")
     if hasattr(self, '_progress_dlg') and self._progress_dlg:
@@ -413,6 +416,12 @@ def _unregister_scan_hotkeys(self):
             pass
 
 def _on_hk_stop(self):
+    if getattr(self,"_marking_exec_worker",None) and self._marking_exec_worker.isRunning():
+        self._marking_stop()
+        return
+    if getattr(self,"_marking_rollback_worker",None) and self._marking_rollback_worker.isRunning():
+        self._marking_stop()
+        return
     w=getattr(self,'_scan_worker',None) or getattr(self,'_gamepad_worker',None)
     if w and w.scanner:
         w.scanner._stopped=True
@@ -433,6 +442,9 @@ def _on_hk_finish(self):
     if w and w.scanner: w.scanner._finish_flag=True
 
 def _on_gamepad_error(self,err):
+    if getattr(self,"_marking_pipeline",False):
+        self._marking_on_pipeline_error(err)
+        return
     self._unregister_scan_hotkeys()
     self._replace_inventory_on_next_parse=False
     self.showNormal(); self.activateWindow()

@@ -225,6 +225,11 @@ class MainWindow(QMainWindow):
         self._pending_parse_only=False
         self._pending_parse_scope="all"
         self._pending_scan_mode=None
+        self._marking_session=None
+        self._marking_inventory=[]
+        self._marking_preview=None
+        self._marking_cached_targets=[]
+        self._marking_pipeline=False
         self._pending_delete_after_parse=[]
         self._identify_blueprint_cache=None
         self.state_mgr=StateManager(config_dir=str(USER_CONFIG_DIR)); self._log_enabled=False
@@ -471,6 +476,8 @@ class MainWindow(QMainWindow):
             self._identify_blueprint_cache=None
             if hasattr(self,"ident_shape_combo"):
                 self._refresh_identify_options()
+            if hasattr(self,"marking_role_selector"):
+                self._refresh_marking()
         except Exception as e: logger.error(f"加载失败: {e}")
 
     def _canonicalize_loaded_role_sets(self):
@@ -744,6 +751,7 @@ def _install_feature_methods():
     from src.features.identification import controller as identification_controller
     from src.features.identification import dialogs as identification_dialogs
     from src.features.scanning import controller as scanning_controller
+    from src.features.discard import controller as discard_controller
 
     app_module = _sys.modules[__name__]
     for module in (
@@ -755,6 +763,7 @@ def _install_feature_methods():
         identification_controller,
         identification_dialogs,
         scanning_controller,
+        discard_controller,
     ):
         module.install_methods(app_module, MainWindow)
 

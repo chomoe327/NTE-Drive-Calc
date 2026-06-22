@@ -1,0 +1,8 @@
+{
+  "discard": [
+    {"button": "DPAD_LEFT", "hold_ms": 80, "after_ms": 200}
+  ],
+  "lock": [
+    {"button": "DPAD_RIGHT", "hold_ms": 80, "after_ms": 200}
+  ]
+}

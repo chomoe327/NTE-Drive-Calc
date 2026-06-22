@@ -87,3 +87,30 @@ class GamepadScanWorkerThread(QThread):
         except Exception as exc:
             logger.error(f"GamepadScanWorker 异常: {exc}")
             self.error.emit(str(exc))
+
+
+class MarkingWorkerThread(QThread):
+    step_done = Signal(object)
+    finished_ok = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, target, parent=None):
+        super().__init__(parent)
+        self.target = target
+        self.executor = None
+
+    def request_stop(self):
+        if self.executor:
+            self.executor.emergency_stop()
+
+    def run(self):
+        try:
+            result = self.target(self)
+            self.finished_ok.emit(result)
+        except SystemExit as exc:
+            logger.error(f"MarkingWorkerThread 捕获 SystemExit: {exc}")
+            self.error.emit(f"系统异常退出: {exc}")
+        except Exception as exc:
+            err_detail = f"{exc}\n\n{tb.format_exc()}"
+            logger.error(f"MarkingWorkerThread 异常: {err_detail}")
+            self.error.emit(str(exc))

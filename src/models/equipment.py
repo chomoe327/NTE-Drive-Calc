@@ -34,6 +34,7 @@ class BaseEquipment(BaseModel):
     max_score: float = Field(default=0.0)
     is_mvp: bool = Field(default=False)
     pick_order: int = Field(default=0)
+    scan_index: int | None = Field(default=None)
 
 
 class Drive(BaseEquipment):

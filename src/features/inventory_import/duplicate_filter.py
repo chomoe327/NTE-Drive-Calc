@@ -10,7 +10,8 @@ import cv2
 import numpy as np
 
 from src.scanner.window_capture import crop_window_border_from_image
-from src.utils.image_io import imread_unicode
+from src.features.discard.scan_session import attach_scan_index_from_filename
+from src.features.scanning.naming import raw_drive_index_from_name
 
 
 def image_fingerprint(image_path: str):
@@ -106,6 +107,11 @@ def process_image_file(processor, image_path: str, filename: str | None = None):
 
     if is_adjacent_duplicate:
         return item_data, False
+
+    item_dict = item_data.model_dump()
+    attach_scan_index_from_filename(item_dict, current_name)
+    if raw_drive_index_from_name(current_name) is not None:
+        item_data = type(item_data).model_validate(item_dict)
 
     processor.inventory.append(item_data)
     return item_data, True

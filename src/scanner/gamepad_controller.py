@@ -112,31 +112,9 @@ class GamepadScanner:
                 self.push_left_joystick(0.0, -1.0)
 
     def _generate_path(self, total_drives: int) -> list:
-        scan_order = []
-        for row in range((total_drives + self.cols - 1) // self.cols):
-            cols_in_row = min(self.cols, total_drives - row * self.cols)
-            if row % 2 == 0:
-                for col in range(cols_in_row):
-                    scan_order.append((row, col))
-            else:
-                for col in range(cols_in_row - 1, -1, -1):
-                    scan_order.append((row, col))
+        from src.scanner.grid_navigation import generate_path_commands
 
-        commands = []
-        curr_row, curr_col = 0, 0
-        for target_row, target_col in scan_order:
-            moves = []
-            while curr_col < target_col:
-                moves.append("R")
-                curr_col += 1
-            while curr_col > target_col:
-                moves.append("L")
-                curr_col -= 1
-            while curr_row < target_row:
-                moves.append("D")
-                curr_row += 1
-            commands.append(moves)
-        return commands
+        return generate_path_commands(total_drives, self.cols)
 
     def start_scan(self, total_drives=None):
         logger.warning("\n" + "=" * 50)
