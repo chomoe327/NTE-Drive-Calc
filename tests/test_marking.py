@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+
 from src.domain.grade_scoring import (
     GRADE_LADDER,
     best_grade,
@@ -28,32 +30,37 @@ from src.features.discard.scan_session import (
 from src.features.discard.scoring import MarkTarget, build_mark_preview
 from src.models.equipment import Drive, Tape
 from src.scanner.grid_navigation import (
-    _INVERT_MOVE,
+    COLS,
     generate_path_commands,
+    generate_scan_order,
     moves_between_scan_indices,
+    moves_between_scan_indices_along_scan_path,
     moves_for_scan_index,
 )
 
 
-def _index_after_moves(from_index: int, moves: list[str], total: int) -> int:
-    paths = generate_path_commands(total)
-    index = from_index
-    offset = 0
-    while offset < len(moves):
-        if index < total:
-            forward = paths[index]
-            if moves[offset : offset + len(forward)] == forward:
-                offset += len(forward)
-                index += 1
-                continue
-        if index > 1:
-            backward = [_INVERT_MOVE[move] for move in reversed(paths[index - 1])]
-            if moves[offset : offset + len(backward)] == backward:
-                offset += len(backward)
-                index -= 1
-                continue
-        raise AssertionError(f"无法解析移动序列，停在第 {index} 格，剩余 {moves[offset:]}")
-    return index
+def _index_at_position(pos: tuple[int, int], total: int, cols: int = COLS) -> int:
+    for index, candidate in enumerate(generate_scan_order(total, cols), 1):
+        if candidate == pos:
+            return index
+    raise AssertionError(f"坐标 {pos} 不在扫描序列中")
+
+
+def _index_after_geometric_moves(from_index: int, moves: list[str], total: int, cols: int = COLS) -> int:
+    order = generate_scan_order(total, cols)
+    row, col = order[from_index - 1]
+    for move in moves:
+        if move == "R":
+            col += 1
+        elif move == "L":
+            col -= 1
+        elif move == "D":
+            row += 1
+        elif move == "U":
+            row -= 1
+        else:
+            raise AssertionError(f"未知移动: {move}")
+    return _index_at_position((row, col), total, cols)
 
 
 def _drive(uid: str, scan_index: int, quality: str = "Gold", shape_id: str = "L1") -> dict:
@@ -266,29 +273,70 @@ class GridNavigationTest(unittest.TestCase):
         self.assertEqual(moves_for_scan_index(1, 10), paths[0])
         self.assertEqual(moves_for_scan_index(10, 10), paths[9])
 
-    def test_moves_between_forward_matches_scan_segments(self):
-        total = 12
-        paths = generate_path_commands(total)
-        expected: list[str] = []
-        for step in range(1, 7):
-            expected.extend(paths[step])
-        self.assertEqual(moves_between_scan_indices(1, 7, total), expected)
+    def test_moves_between_forward_lands_on_target(self):
+        total = 135
+        for start, end in ((1, 7), (3, 8), (1, 12), (8, 12), (1, 135), (20, 88)):
+            moves = moves_between_scan_indices(start, end, total)
+            landed = _index_after_geometric_moves(start, moves, total)
+            self.assertEqual(landed, end, f"{start}->{end}")
 
-    def test_moves_between_forward_compound(self):
-        total = 12
-        paths = generate_path_commands(total)
-        expected: list[str] = []
-        for step in range(3, 8):
-            expected.extend(paths[step])
-        self.assertEqual(moves_between_scan_indices(3, 8, total), expected)
+    def test_moves_between_forward_is_shorter_than_scan_path(self):
+        total = 135
+        direct = moves_between_scan_indices(1, 135, total)
+        along_path = moves_between_scan_indices_along_scan_path(1, 135, total)
+        self.assertLess(len(direct), len(along_path))
 
     def test_moves_between_backward_returns_to_start(self):
         total = 12
         for start, end in ((1, 7), (3, 8), (1, 12), (8, 12)):
             forward = moves_between_scan_indices(start, end, total)
             backward = moves_between_scan_indices(end, start, total)
-            landed = _index_after_moves(start, forward + backward, total)
+            landed = _index_after_geometric_moves(start, forward + backward, total)
             self.assertEqual(landed, start, f"{start}->{end} 往返后应回到第 {start} 格")
+
+
+class MarkStateDetectorTest(unittest.TestCase):
+    def test_detect_prefers_marked_template(self):
+        from src.features.discard.mark_state import MarkStateDetector
+
+        template_dir = Path(__file__).resolve().parents[1] / "config" / "templates" / "marking"
+        if not (template_dir / "discard_marked.png").exists():
+            self.skipTest("标记模板不存在")
+        detector = MarkStateDetector(template_dir)
+        marked = detector._templates.get("discard_marked")
+        unmarked = detector._templates.get("discard_unmarked")
+        self.assertIsNotNone(marked)
+        self.assertIsNotNone(unmarked)
+        canvas = np.full((120, 120), 180, dtype=np.uint8)
+        mh, mw = marked.shape[:2]
+        canvas[10 : 10 + mh, 10 : 10 + mw] = marked
+        is_marked, marked_score, unmarked_score = detector._pair_state(
+            canvas,
+            "discard_marked",
+            "discard_unmarked",
+        )
+        self.assertTrue(is_marked)
+        self.assertGreater(marked_score, unmarked_score)
+
+    def test_detect_prefers_lock_marked_template(self):
+        from src.features.discard.mark_state import MarkStateDetector
+
+        template_dir = Path(__file__).resolve().parents[1] / "config" / "templates" / "marking"
+        if not (template_dir / "lock_marked.png").exists():
+            self.skipTest("标记模板不存在")
+        detector = MarkStateDetector(template_dir)
+        marked = detector._templates.get("lock_marked")
+        self.assertIsNotNone(marked)
+        canvas = np.full((120, 120), 180, dtype=np.uint8)
+        mh, mw = marked.shape[:2]
+        canvas[20 : 20 + mh, 20 : 20 + mw] = marked
+        is_marked, marked_score, unmarked_score = detector._pair_state(
+            canvas,
+            "lock_marked",
+            "lock_unmarked",
+        )
+        self.assertTrue(is_marked)
+        self.assertGreater(marked_score, unmarked_score)
 
 
 class MarkingExecutorButtonTest(unittest.TestCase):
@@ -343,9 +391,12 @@ class MarkingExecutorTest(unittest.TestCase):
             MarkTarget(8, "u8", "drive", "Gold", "C", None, "lock"),
         ]
         executor.execute_targets(targets)
-        applied = [call.args[0] for call in scanner._apply_moves.call_args_list]
-        self.assertEqual(applied[0], moves_between_scan_indices(1, 3, 12))
-        self.assertEqual(applied[1], moves_between_scan_indices(3, 8, 12))
+        scanner._apply_moves.assert_called()
+        applied = [call.kwargs.get("fast", call.args[1] if len(call.args) > 1 else False) for call in scanner._apply_moves.call_args_list]
+        self.assertTrue(all(applied), "标记导航应使用快速移动模式")
+        moves = [call.args[0] for call in scanner._apply_moves.call_args_list]
+        self.assertEqual(moves[0], moves_between_scan_indices(1, 3, 12))
+        self.assertEqual(moves[1], moves_between_scan_indices(3, 8, 12))
 
     @patch("src.features.discard.executor.BatchProcessor")
     @patch("src.features.discard.executor.mss.mss")

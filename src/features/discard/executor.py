@@ -134,8 +134,10 @@ class MarkingExecutor:
         screenshot, _ = capture_foreground_window(sct)
         arr = np.array(screenshot)
         if arr.shape[2] == 4:
-            return cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
-        return arr[:, :, :3]
+            arr = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+        else:
+            arr = arr[:, :, :3]
+        return crop_window_border_from_image(arr)
 
     def _verify_current_drive(self, image_bgr: np.ndarray, entry) -> None:
         tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
@@ -173,7 +175,7 @@ class MarkingExecutor:
             self.session.total_drives,
             self.session.cols,
         )
-        self.scanner._apply_moves(moves)
+        self.scanner._apply_moves(moves, fast=True)
 
     def _prepare_at_first_cell(self) -> None:
         assert self.scanner is not None
@@ -182,7 +184,15 @@ class MarkingExecutor:
 
     def _already_marked(self, image_bgr: np.ndarray, action: str) -> bool:
         states = self.detector.detect_from_bgr(image_bgr)
-        return bool(states.get(action))
+        marked = bool(states.get(action))
+        logger.debug(
+            f"标记状态检测 action={action} marked={marked} "
+            f"discard={float(states.get('discard_marked_score', 0.0)):.3f}/"
+            f"{float(states.get('discard_unmarked_score', 0.0)):.3f} "
+            f"lock={float(states.get('lock_marked_score', 0.0)):.3f}/"
+            f"{float(states.get('lock_unmarked_score', 0.0)):.3f}"
+        )
+        return marked
 
     def execute_targets(
         self,
@@ -211,7 +221,7 @@ class MarkingExecutor:
                     continue
                 self._navigate_between(current_index, target.scan_index)
                 current_index = target.scan_index
-                time.sleep(0.45)
+                time.sleep(0.25)
                 image_bgr = self._capture_bgr(sct)
                 try:
                     self._verify_entry_at_current_cell(image_bgr, entry)
@@ -258,7 +268,7 @@ class MarkingExecutor:
                     continue
                 self._navigate_between(current_index, entry.scan_index)
                 current_index = entry.scan_index
-                time.sleep(0.45)
+                time.sleep(0.25)
                 image_bgr = self._capture_bgr(sct)
                 self._verify_entry_at_current_cell(image_bgr, session_entry)
                 if not self._already_marked(image_bgr, entry.action):

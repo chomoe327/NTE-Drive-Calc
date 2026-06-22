@@ -52,7 +52,46 @@ def moves_between_scan_indices(
     total_drives: int,
     cols: int = COLS,
 ) -> list[str]:
-    """Moves along the same S-curve scan path used by full inventory scanning."""
+    """Direct grid moves between two slots (horizontal first, then vertical)."""
+    if from_index == to_index:
+        return []
+    if not 1 <= from_index <= total_drives or not 1 <= to_index <= total_drives:
+        raise ValueError(f"scan_index 超出范围 1-{total_drives}")
+    order = generate_scan_order(total_drives, cols)
+    from_row, from_col = order[from_index - 1]
+    to_row, to_col = order[to_index - 1]
+    moves: list[str] = []
+    row, col = from_row, from_col
+    if to_index > from_index:
+        while col < to_col:
+            moves.append("R")
+            col += 1
+        while col > to_col:
+            moves.append("L")
+            col -= 1
+        while row < to_row:
+            moves.append("D")
+            row += 1
+        return moves
+    while row > to_row:
+        moves.append("U")
+        row -= 1
+    while col > to_col:
+        moves.append("L")
+        col -= 1
+    while col < to_col:
+        moves.append("R")
+        col += 1
+    return moves
+
+
+def moves_between_scan_indices_along_scan_path(
+    from_index: int,
+    to_index: int,
+    total_drives: int,
+    cols: int = COLS,
+) -> list[str]:
+    """Step through every intermediate cell along the full-scan S-curve path."""
     if from_index == to_index:
         return []
     if not 1 <= from_index <= total_drives or not 1 <= to_index <= total_drives:

@@ -9,12 +9,14 @@ import cv2
 import numpy as np
 
 from src.scanner.config import ScannerConfig
-from src.scanner.window_capture import scale_region
+from src.scanner.window_capture import crop_window_border_from_image, fit_content_rect, scale_region
 from src.utils.image_io import imread_unicode
+from src.utils.logger import logger
 
 BASE_DISCARD_ROI = (2055, 330, 2145, 420)
 BASE_LOCK_ROI = (2265, 330, 2355, 420)
-DEFAULT_THRESHOLD = 0.82
+DEFAULT_THRESHOLD = 0.78
+RELATIVE_MARGIN = 0.05
 
 
 class MarkStateDetector:
@@ -40,14 +42,22 @@ class MarkStateDetector:
             img = imread_unicode(str(path), cv2.IMREAD_GRAYSCALE)
             if img is not None:
                 self._templates[name] = img
+            else:
+                logger.warning(f"标记状态模板缺失: {path}")
 
     def _scale_roi(self, roi: tuple[int, int, int, int], width: int, height: int) -> tuple[int, int, int, int]:
+        content_rect = fit_content_rect(
+            width,
+            height,
+            (ScannerConfig.BASE_WIDTH, ScannerConfig.BASE_HEIGHT),
+        )
         return scale_region(
             roi,
             width,
             height,
             (ScannerConfig.BASE_WIDTH, ScannerConfig.BASE_HEIGHT),
             preserve_aspect=True,
+            content_rect=content_rect,
         )
 
     def _best_score(self, region_gray: np.ndarray, template: np.ndarray) -> float:
@@ -74,10 +84,15 @@ class MarkStateDetector:
             return False, 0.0, 0.0
         marked_score = self._best_score(region_gray, marked)
         unmarked_score = self._best_score(region_gray, unmarked)
-        is_marked = marked_score > unmarked_score and marked_score >= self.confidence_threshold
+        margin = marked_score - unmarked_score
+        is_marked = marked_score > unmarked_score and (
+            marked_score >= self.confidence_threshold
+            or margin >= RELATIVE_MARGIN
+        )
         return is_marked, marked_score, unmarked_score
 
-    def detect_from_bgr(self, image_bgr: np.ndarray) -> dict[str, bool]:
+    def detect_from_bgr(self, image_bgr: np.ndarray) -> dict[str, bool | float]:
+        image_bgr = crop_window_border_from_image(image_bgr)
         height, width = image_bgr.shape[:2]
         gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
         discard_roi = self._scale_roi(BASE_DISCARD_ROI, width, height)
@@ -86,12 +101,27 @@ class MarkStateDetector:
         discard_region = gray[y1:y2, x1:x2]
         x1, y1, x2, y2 = lock_roi
         lock_region = gray[y1:y2, x1:x2]
-        discard_marked, _, _ = self._pair_state(discard_region, "discard_marked", "discard_unmarked")
-        lock_marked, _, _ = self._pair_state(lock_region, "lock_marked", "lock_unmarked")
-        return {"discard": discard_marked, "lock": lock_marked}
+        discard_marked, discard_marked_score, discard_unmarked_score = self._pair_state(
+            discard_region,
+            "discard_marked",
+            "discard_unmarked",
+        )
+        lock_marked, lock_marked_score, lock_unmarked_score = self._pair_state(
+            lock_region,
+            "lock_marked",
+            "lock_unmarked",
+        )
+        return {
+            "discard": discard_marked,
+            "lock": lock_marked,
+            "discard_marked_score": discard_marked_score,
+            "discard_unmarked_score": discard_unmarked_score,
+            "lock_marked_score": lock_marked_score,
+            "lock_unmarked_score": lock_unmarked_score,
+        }
 
     def is_discard_marked(self, image_bgr: np.ndarray) -> bool:
-        return self.detect_from_bgr(image_bgr)["discard"]
+        return bool(self.detect_from_bgr(image_bgr)["discard"])
 
     def is_locked(self, image_bgr: np.ndarray) -> bool:
-        return self.detect_from_bgr(image_bgr)["lock"]
+        return bool(self.detect_from_bgr(image_bgr)["lock"])

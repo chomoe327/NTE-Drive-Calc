@@ -95,24 +95,26 @@ class GamepadScanner:
         logger.info(f"[{counter:04d}] 捕获成功")
         return True
 
-    def push_left_joystick(self, x, y):
+    def push_left_joystick(self, x, y, *, fast: bool = False):
+        press_ms = 0.05 if fast else 0.10
+        settle_ms = 0.08 if fast else 0.30
         self.gamepad.left_joystick_float(x_value_float=x, y_value_float=y)
         self.gamepad.update()
-        time.sleep(0.10)
+        time.sleep(press_ms)
         self.gamepad.left_joystick_float(x_value_float=0.0, y_value_float=0.0)
         self.gamepad.update()
-        time.sleep(0.30)
+        time.sleep(settle_ms)
 
-    def _apply_moves(self, moves):
+    def _apply_moves(self, moves, *, fast: bool = False):
         for move in moves:
             if move == "R":
-                self.push_left_joystick(1.0, 0.0)
+                self.push_left_joystick(1.0, 0.0, fast=fast)
             elif move == "L":
-                self.push_left_joystick(-1.0, 0.0)
+                self.push_left_joystick(-1.0, 0.0, fast=fast)
             elif move == "D":
-                self.push_left_joystick(0.0, -1.0)
+                self.push_left_joystick(0.0, -1.0, fast=fast)
             elif move == "U":
-                self.push_left_joystick(0.0, 1.0)
+                self.push_left_joystick(0.0, 1.0, fast=fast)
 
     def _generate_path(self, total_drives: int) -> list:
         from src.scanner.grid_navigation import generate_path_commands
