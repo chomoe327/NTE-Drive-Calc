@@ -284,6 +284,52 @@ class MarkingLogStoreTest(unittest.TestCase):
         self.assertEqual([e.scan_index for e in candidates], [2, 1])
 
 
+class AnchorNavigationTest(unittest.TestCase):
+    def _simulate_anchor(self, start_row: int, start_col: int, total: int = 135, cols: int = 7):
+        rows = max(1, (total + cols - 1) // cols)
+        row, col = start_row, start_col
+        moves: list[str] = []
+
+        def done() -> bool:
+            return row == 0 and col == 0
+
+        def apply_step(direction: str) -> None:
+            nonlocal row, col
+            moves.append(direction)
+            if direction == "L":
+                col = max(0, col - 1)
+            elif direction == "U":
+                row = max(0, row - 1)
+
+        if done():
+            return moves, row, col
+        for _ in range(cols):
+            if done():
+                break
+            apply_step("L")
+        if done():
+            return moves, row, col
+        for _ in range(rows - 1):
+            if done():
+                break
+            apply_step("U")
+            for _ in range(cols):
+                if done():
+                    break
+                apply_step("L")
+        return moves, row, col
+
+    def test_from_first_row_end_only_moves_left(self):
+        moves, row, col = self._simulate_anchor(0, 6)
+        self.assertEqual((row, col), (0, 0))
+        self.assertEqual(moves.count("U"), 0)
+
+    def test_from_lower_row_uses_up_then_left(self):
+        moves, row, col = self._simulate_anchor(3, 2)
+        self.assertEqual((row, col), (0, 0))
+        self.assertGreater(moves.count("U"), 0)
+
+
 class GridNavigationTest(unittest.TestCase):
     def test_moves_for_scan_index_matches_path(self):
         paths = generate_path_commands(10)

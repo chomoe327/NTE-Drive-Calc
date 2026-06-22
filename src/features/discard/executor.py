@@ -178,10 +178,23 @@ class MarkingExecutor:
         self.scanner._apply_moves(moves, pace="marking")
         time.sleep(0.2)
 
+    def _matches_first_cell(self, sct, entry) -> bool:
+        if entry is None:
+            return False
+        try:
+            self._verify_current_drive(self._capture_bgr(sct), entry)
+            return True
+        except InventoryChangedError:
+            return False
+
     def _prepare_at_first_cell(self, sct) -> None:
         assert self.scanner is not None
-        self.scanner.anchor_to_first_cell(self.session.total_drives, self.session.cols)
         entry = self.session.entry_by_index(1)
+        self.scanner.anchor_to_first_cell(
+            self.session.total_drives,
+            self.session.cols,
+            is_at_first_cell=lambda: self._matches_first_cell(sct, entry),
+        )
         if entry is None:
             return
         image_bgr = self._capture_bgr(sct)

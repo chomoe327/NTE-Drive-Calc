@@ -4,6 +4,7 @@
 import os
 import shutil
 import time
+from collections.abc import Callable
 
 import mss
 import mss.tools
@@ -122,15 +123,49 @@ class GamepadScanner:
             elif move == "U":
                 self.push_left_joystick(0.0, 1.0, pace=pace)
 
-    def anchor_to_first_cell(self, total_drives: int, cols: int | None = None) -> None:
-        """Burst left/up to return selection to the top-left inventory cell."""
+    def anchor_to_first_cell(
+        self,
+        total_drives: int,
+        cols: int | None = None,
+        *,
+        is_at_first_cell: Callable[[], bool] | None = None,
+    ) -> None:
+        """Return selection to scan index 1 using single-step U/L with OCR checks."""
         cols = cols or self.cols
-        rows = (int(total_drives) + cols - 1) // cols
-        moves = ["L"] * (cols + 2) + ["U"] * (rows + 2)
-        logger.info(f"自动归位到第一格（{len(moves)} 步）")
-        self.wake_inventory_selection(pace="marking")
-        self._apply_moves(moves, pace="marking")
-        time.sleep(0.3)
+        rows = max(1, (int(total_drives) + cols - 1) // cols)
+        time.sleep(0.25)
+
+        def _done() -> bool:
+            return bool(is_at_first_cell and is_at_first_cell())
+
+        if _done():
+            logger.info("已在第一格，跳过归位")
+            return
+
+        logger.info("自动归位到第一格（逐步移动并校验）")
+
+        for _ in range(cols):
+            if _done():
+                logger.info("归位完成（左移）")
+                return
+            self._apply_moves(["L"], pace="marking")
+
+        if _done():
+            logger.info("归位完成（左移）")
+            return
+
+        for _ in range(rows - 1):
+            if _done():
+                logger.info("归位完成（上行）")
+                return
+            self._apply_moves(["U"], pace="marking")
+            for _ in range(cols):
+                if _done():
+                    logger.info("归位完成（上行后左移）")
+                    return
+                self._apply_moves(["L"], pace="marking")
+
+        time.sleep(0.2)
 
     def _generate_path(self, total_drives: int) -> list:
         from src.scanner.grid_navigation import generate_path_commands
