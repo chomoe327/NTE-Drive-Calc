@@ -39,6 +39,7 @@ __all__ = [
     "_marking_calculate",
     "_marking_on_calculate_done",
     "_marking_on_calculate_error",
+    "_marking_prepare_gamepad_action",
     "_marking_execute",
     "_marking_on_execute_done",
     "_marking_on_execute_error",
