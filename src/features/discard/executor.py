@@ -19,7 +19,6 @@ import numpy as np
 from src.features.discard.mark_state import MarkStateDetector
 from src.features.discard.scan_session import InventoryChangedError, ScanSession, signature_from_item_dict, verify_signature
 from src.features.discard.scoring import MarkTarget
-from src.features.identification.parser import normalized_signature_data
 from src.scanner.batch_processor import BatchProcessor
 from src.scanner.gamepad_controller import GamepadScanner, ViGEmDriverNotReadyError
 from src.scanner.grid_navigation import moves_between_scan_indices
@@ -137,7 +136,11 @@ class MarkingExecutor:
         try:
             cv2.imwrite(tmp_path, image_bgr)
             item = self._processor._process_single_image(tmp_path)
-            actual = signature_from_item_dict(normalized_signature_data(item.model_dump()))
+            actual = signature_from_item_dict(item.model_dump())
+            if entry.signature != actual:
+                logger.warning(
+                    f"第 {entry.scan_index} 格签名校验失败 | 期望={entry.signature} | 实际={actual}"
+                )
             verify_signature(entry.signature, actual)
         finally:
             try:

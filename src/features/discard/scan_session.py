@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.features.identification.parser import item_signature_from_dict, normalized_signature_data
+from src.features.identification.parser import equipment_identity_signature
 from src.features.scanning.naming import raw_drive_index_from_name
 
 
@@ -71,7 +71,7 @@ def _now_iso() -> str:
 
 
 def signature_from_item_dict(item: dict) -> str:
-    return item_signature_from_dict(normalized_signature_data(item))
+    return equipment_identity_signature(item)
 
 
 def build_session_from_inventory(

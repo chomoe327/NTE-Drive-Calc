@@ -22,6 +22,7 @@ from src.features.discard.scan_session import (
     ScanSession,
     ScanSessionEntry,
     build_session_from_inventory,
+    signature_from_item_dict,
     verify_signature,
 )
 from src.features.discard.scoring import MarkTarget, build_mark_preview
@@ -141,6 +142,21 @@ class MarkingScanSessionTest(unittest.TestCase):
     def test_signature_mismatch_raises(self):
         with self.assertRaises(InventoryChangedError):
             verify_signature("a", "b")
+
+    def test_signature_ignores_scan_index_and_uid(self):
+        left = _drive("a", 1)
+        right = _drive("b", 99)
+        self.assertEqual(signature_from_item_dict(left), signature_from_item_dict(right))
+
+    def test_signature_matches_live_parse_shape(self):
+        inventory_item = _drive("a", 135)
+        parsed_item = dict(inventory_item)
+        parsed_item.pop("scan_index", None)
+        parsed_item["uid"] = "live-ocr-uid"
+        self.assertEqual(
+            signature_from_item_dict(inventory_item),
+            signature_from_item_dict(parsed_item),
+        )
 
 
 class MarkingScoringTest(unittest.TestCase):

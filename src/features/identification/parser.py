@@ -289,9 +289,46 @@ def item_signature_from_dict(item_data: dict) -> str:
 
 def normalized_signature_data(item_data: dict) -> dict:
     data = dict(item_data or {})
-    for key in ("uid", "role_scores", "max_score", "is_mvp", "pick_order"):
+    for key in ("uid", "role_scores", "max_score", "is_mvp", "pick_order", "scan_index"):
         data.pop(key, None)
     return data
+
+
+def equipment_identity_data(item_data: dict) -> dict:
+    """OCR-stable equipment fields used for drift detection during marking."""
+    data = dict(item_data or {})
+    item_type = str(data.get("item_type") or "")
+    quality = str(data.get("quality") or "")
+    sub_stats = data.get("sub_stats") or {}
+    sub_pairs = sorted((str(key), float(value)) for key, value in sub_stats.items())
+    if item_type == "drive":
+        main_stats = data.get("main_stats") or {}
+        main_pairs = sorted((str(key), float(value)) for key, value in main_stats.items())
+        return {
+            "item_type": "drive",
+            "quality": quality,
+            "shape_id": str(data.get("shape_id") or ""),
+            "main_stats": main_pairs,
+            "sub_stats": sub_pairs,
+        }
+    if item_type == "tape":
+        return {
+            "item_type": "tape",
+            "quality": quality,
+            "set_name": str(data.get("set_name") or ""),
+            "main_stats": str(data.get("main_stats") or ""),
+            "sub_stats": sub_pairs,
+        }
+    return {"item_type": item_type, "quality": quality, "sub_stats": sub_pairs}
+
+
+def equipment_identity_signature(item_data: dict) -> str:
+    return json.dumps(
+        equipment_identity_data(item_data),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def load_existing_inventory_signatures(processor) -> set[str]:
