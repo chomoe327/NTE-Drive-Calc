@@ -41,3 +41,29 @@ def moves_for_scan_index(scan_index: int, total_drives: int, cols: int = COLS) -
     if not 1 <= scan_index <= total_drives:
         raise ValueError(f"scan_index {scan_index} 超出范围 1-{total_drives}")
     return generate_path_commands(total_drives, cols)[scan_index - 1]
+
+
+_INVERT_MOVE = {"R": "L", "L": "R", "D": "U", "U": "D"}
+
+
+def moves_between_scan_indices(
+    from_index: int,
+    to_index: int,
+    total_drives: int,
+    cols: int = COLS,
+) -> list[str]:
+    """Moves along the same S-curve scan path used by full inventory scanning."""
+    if from_index == to_index:
+        return []
+    if not 1 <= from_index <= total_drives or not 1 <= to_index <= total_drives:
+        raise ValueError(f"scan_index 超出范围 1-{total_drives}")
+    paths = generate_path_commands(total_drives, cols)
+    if to_index > from_index:
+        moves: list[str] = []
+        for step in range(from_index, to_index):
+            moves.extend(paths[step])
+        return moves
+    moves: list[str] = []
+    for step in range(to_index, from_index):
+        moves.extend(paths[step])
+    return [_INVERT_MOVE[move] for move in reversed(moves)]

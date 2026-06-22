@@ -22,7 +22,7 @@ from src.features.discard.scoring import MarkTarget
 from src.features.identification.parser import normalized_signature_data
 from src.scanner.batch_processor import BatchProcessor
 from src.scanner.gamepad_controller import GamepadScanner, ViGEmDriverNotReadyError
-from src.scanner.grid_navigation import moves_for_scan_index
+from src.scanner.grid_navigation import moves_between_scan_indices
 from src.scanner.window_capture import capture_foreground_window, crop_window_border_from_image
 from src.utils.image_io import imread_unicode
 from src.utils.logger import logger
@@ -145,15 +145,29 @@ class MarkingExecutor:
             except OSError:
                 pass
 
-    def _reset_to_start(self) -> None:
-        assert self.scanner is not None
-        self.scanner.push_left_joystick(-1.0, 0.0)
-        time.sleep(0.5)
+    def _verify_entry_at_current_cell(self, image_bgr: np.ndarray, entry) -> None:
+        try:
+            self._verify_current_drive(image_bgr, entry)
+        except InventoryChangedError as exc:
+            raise InventoryChangedError(
+                f"第 {entry.scan_index} 格装备与快照不一致（{exc}）。"
+                "请确认已选中第一排第一个格子，且背包未手动变动。"
+            ) from exc
 
-    def _navigate_to_index(self, scan_index: int) -> None:
+    def _navigate_between(self, from_index: int, to_index: int) -> None:
         assert self.scanner is not None
-        moves = moves_for_scan_index(scan_index, self.session.total_drives, self.session.cols)
+        moves = moves_between_scan_indices(
+            from_index,
+            to_index,
+            self.session.total_drives,
+            self.session.cols,
+        )
         self.scanner._apply_moves(moves)
+
+    def _prepare_at_first_cell(self) -> None:
+        assert self.scanner is not None
+        self.scanner.wake_inventory_selection()
+        time.sleep(0.35)
 
     def _already_marked(self, image_bgr: np.ndarray, action: str) -> bool:
         states = self.detector.detect_from_bgr(image_bgr)
@@ -163,18 +177,17 @@ class MarkingExecutor:
         self,
         targets: list[MarkTarget],
         *,
-        switch_delay: float = 3.0,
         on_progress: Callable[[int, int, MarkStepResult], None] | None = None,
     ) -> list[MarkStepResult]:
         self._connect()
         assert self.scanner is not None
         self._stopped = False
-        logger.warning(f"将在 {switch_delay:.0f} 秒后开始标记，请切回游戏并选中第一格驱动。")
-        time.sleep(max(0.0, switch_delay))
-        self._reset_to_start()
+        self.scanner.wait_for_handoff()
         results: list[MarkStepResult] = []
         total = len(targets)
+        current_index = 1
         with mss.mss() as sct:
+            self._prepare_at_first_cell()
             for idx, target in enumerate(targets, 1):
                 if self._stopped:
                     break
@@ -185,11 +198,12 @@ class MarkingExecutor:
                     if on_progress:
                         on_progress(idx, total, result)
                     continue
-                self._navigate_to_index(target.scan_index)
-                time.sleep(0.35)
+                self._navigate_between(current_index, target.scan_index)
+                current_index = target.scan_index
+                time.sleep(0.45)
                 image_bgr = self._capture_bgr(sct)
                 try:
-                    self._verify_current_drive(image_bgr, entry)
+                    self._verify_entry_at_current_cell(image_bgr, entry)
                 except InventoryChangedError as exc:
                     result = MarkStepResult(target.scan_index, target.action, "aborted", str(exc))
                     results.append(result)
@@ -214,28 +228,28 @@ class MarkingExecutor:
         self,
         entries: list,
         *,
-        switch_delay: float = 3.0,
         on_progress: Callable[[int, int, MarkStepResult], None] | None = None,
     ) -> list[MarkStepResult]:
         self._connect()
         assert self.scanner is not None
         self._stopped = False
-        logger.warning(f"将在 {switch_delay:.0f} 秒后开始回滚标记，请切回游戏。")
-        time.sleep(max(0.0, switch_delay))
-        self._reset_to_start()
+        self.scanner.wait_for_handoff()
         results: list[MarkStepResult] = []
         total = len(entries)
+        current_index = 1
         with mss.mss() as sct:
+            self._prepare_at_first_cell()
             for idx, entry in enumerate(entries, 1):
                 if self._stopped:
                     break
                 session_entry = self.session.entry_by_index(entry.scan_index)
                 if session_entry is None:
                     continue
-                self._navigate_to_index(entry.scan_index)
-                time.sleep(0.35)
+                self._navigate_between(current_index, entry.scan_index)
+                current_index = entry.scan_index
+                time.sleep(0.45)
                 image_bgr = self._capture_bgr(sct)
-                self._verify_current_drive(image_bgr, session_entry)
+                self._verify_entry_at_current_cell(image_bgr, session_entry)
                 if not self._already_marked(image_bgr, entry.action):
                     result = MarkStepResult(entry.scan_index, entry.action, "skipped_not_marked")
                     results.append(result)

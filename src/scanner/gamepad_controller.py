@@ -30,6 +30,7 @@ def _format_vigem_error(exc: Exception) -> str:
 
 class GamepadScanner:
     MAX_INVENTORY_COUNT = 2000
+    HANDOFF_DELAY_SEC = 3.0
 
     def __init__(self, output_dir="scanned_images"):
         self.output_dir = output_dir
@@ -110,18 +111,28 @@ class GamepadScanner:
                 self.push_left_joystick(-1.0, 0.0)
             elif move == "D":
                 self.push_left_joystick(0.0, -1.0)
+            elif move == "U":
+                self.push_left_joystick(0.0, 1.0)
 
     def _generate_path(self, total_drives: int) -> list:
         from src.scanner.grid_navigation import generate_path_commands
 
         return generate_path_commands(total_drives, self.cols)
 
-    def start_scan(self, total_drives=None):
+    def wait_for_handoff(self) -> None:
         logger.warning("\n" + "=" * 50)
         logger.warning("虚拟手柄已就位，将在 3 秒后接管控制，请切回游戏")
         logger.warning("请确保此时已选中第一排第一个驱动/卡带")
         logger.warning("=" * 50)
-        time.sleep(3)
+        time.sleep(self.HANDOFF_DELAY_SEC)
+
+    def wake_inventory_selection(self) -> None:
+        logger.info("发送撞墙唤醒信号，确认背包选中态")
+        self.push_left_joystick(-1.0, 0.0)
+        time.sleep(0.5)
+
+    def start_scan(self, total_drives=None):
+        self.wait_for_handoff()
 
         if total_drives is None:
             raise ValueError("全量扫描需要先填写库存数量。")
@@ -130,8 +141,7 @@ class GamepadScanner:
             raise ValueError(f"库存数量必须在 1-{self.MAX_INVENTORY_COUNT} 之间。")
 
         logger.info("\n====== 发送撞墙唤醒信号 ======")
-        self.push_left_joystick(-1.0, 0.0)
-        time.sleep(0.5)
+        self.wake_inventory_selection()
 
         logger.info(f"\n====== S 形遍历启动（总目标 {total_drives} 个）======")
         self._prepare_temp_output()

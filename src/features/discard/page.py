@@ -122,15 +122,6 @@ def build_marking_page(window):
     window.marking_rule_hint.setStyleSheet("color:#f85149;font-size:12px;border:none")
     rule_card.layout().addWidget(window.marking_rule_hint)
 
-    delay_row = QHBoxLayout()
-    delay_row.addWidget(QLabel("切回游戏延迟(秒):"))
-    window.marking_delay_edit = QLineEdit("3")
-    window.marking_delay_edit.setValidator(QIntValidator(0, 120, window.marking_delay_edit))
-    window.marking_delay_edit.setMaximumWidth(80)
-    delay_row.addWidget(window.marking_delay_edit)
-    delay_row.addStretch()
-    rule_card.layout().addLayout(delay_row)
-
     action_row = QHBoxLayout()
     window.marking_calc_btn = QPushButton("计算")
     window.marking_calc_btn.setObjectName("btnAction")

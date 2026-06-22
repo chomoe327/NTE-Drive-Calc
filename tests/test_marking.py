@@ -26,7 +26,33 @@ from src.features.discard.scan_session import (
 )
 from src.features.discard.scoring import MarkTarget, build_mark_preview
 from src.models.equipment import Drive, Tape
-from src.scanner.grid_navigation import generate_path_commands, moves_for_scan_index
+from src.scanner.grid_navigation import (
+    _INVERT_MOVE,
+    generate_path_commands,
+    moves_between_scan_indices,
+    moves_for_scan_index,
+)
+
+
+def _index_after_moves(from_index: int, moves: list[str], total: int) -> int:
+    paths = generate_path_commands(total)
+    index = from_index
+    offset = 0
+    while offset < len(moves):
+        if index < total:
+            forward = paths[index]
+            if moves[offset : offset + len(forward)] == forward:
+                offset += len(forward)
+                index += 1
+                continue
+        if index > 1:
+            backward = [_INVERT_MOVE[move] for move in reversed(paths[index - 1])]
+            if moves[offset : offset + len(backward)] == backward:
+                offset += len(backward)
+                index -= 1
+                continue
+        raise AssertionError(f"无法解析移动序列，停在第 {index} 格，剩余 {moves[offset:]}")
+    return index
 
 
 def _drive(uid: str, scan_index: int, quality: str = "Gold", shape_id: str = "L1") -> dict:
@@ -224,8 +250,70 @@ class GridNavigationTest(unittest.TestCase):
         self.assertEqual(moves_for_scan_index(1, 10), paths[0])
         self.assertEqual(moves_for_scan_index(10, 10), paths[9])
 
+    def test_moves_between_forward_matches_scan_segments(self):
+        total = 12
+        paths = generate_path_commands(total)
+        expected: list[str] = []
+        for step in range(1, 7):
+            expected.extend(paths[step])
+        self.assertEqual(moves_between_scan_indices(1, 7, total), expected)
+
+    def test_moves_between_forward_compound(self):
+        total = 12
+        paths = generate_path_commands(total)
+        expected: list[str] = []
+        for step in range(3, 8):
+            expected.extend(paths[step])
+        self.assertEqual(moves_between_scan_indices(3, 8, total), expected)
+
+    def test_moves_between_backward_returns_to_start(self):
+        total = 12
+        for start, end in ((1, 7), (3, 8), (1, 12), (8, 12)):
+            forward = moves_between_scan_indices(start, end, total)
+            backward = moves_between_scan_indices(end, start, total)
+            landed = _index_after_moves(start, forward + backward, total)
+            self.assertEqual(landed, start, f"{start}->{end} 往返后应回到第 {start} 格")
+
 
 class MarkingExecutorTest(unittest.TestCase):
+    @patch("src.features.discard.executor.BatchProcessor")
+    @patch("src.features.discard.executor.mss.mss")
+    @patch("src.features.discard.executor.GamepadScanner")
+    @patch("src.features.discard.executor.vg", create=True)
+    def test_navigates_targets_in_scan_order(self, _vg, scanner_cls, _mss, _batch):
+        from src.features.discard.executor import MarkingExecutor
+
+        session = ScanSession(
+            session_id="s",
+            created_at="t",
+            total_drives=12,
+            cols=7,
+            entries=[
+                ScanSessionEntry(i, f"u{i}", "Gold", "drive", f"sig{i}", None)
+                for i in range(1, 13)
+            ],
+        )
+        scanner = MagicMock()
+        scanner.wait_for_handoff = MagicMock()
+        scanner.wake_inventory_selection = MagicMock()
+        scanner_cls.return_value = scanner
+        executor = MarkingExecutor(
+            session,
+            template_dir=Path("config/templates/marking"),
+            config_dir=Path("config"),
+        )
+        executor.detector.detect_from_bgr = MagicMock(return_value={"discard": False, "lock": False})
+        executor._verify_current_drive = MagicMock()
+        executor._capture_bgr = MagicMock(return_value=MagicMock(shape=(100, 100, 3)))
+        targets = [
+            MarkTarget(3, "u3", "drive", "Gold", "C", None, "discard"),
+            MarkTarget(8, "u8", "drive", "Gold", "C", None, "lock"),
+        ]
+        executor.execute_targets(targets)
+        applied = [call.args[0] for call in scanner._apply_moves.call_args_list]
+        self.assertEqual(applied[0], moves_between_scan_indices(1, 3, 12))
+        self.assertEqual(applied[1], moves_between_scan_indices(3, 8, 12))
+
     @patch("src.features.discard.executor.BatchProcessor")
     @patch("src.features.discard.executor.mss.mss")
     @patch("src.features.discard.executor.GamepadScanner")
@@ -243,6 +331,7 @@ class MarkingExecutorTest(unittest.TestCase):
             ],
         )
         scanner = MagicMock()
+        scanner.wait_for_handoff = MagicMock()
         scanner_cls.return_value = scanner
         executor = MarkingExecutor(
             session,
@@ -255,7 +344,7 @@ class MarkingExecutorTest(unittest.TestCase):
         targets = [
             MarkTarget(1, "a", "drive", "Gold", "C", None, "discard"),
         ]
-        results = executor.execute_targets(targets, switch_delay=0)
+        results = executor.execute_targets(targets)
         self.assertEqual(results[0].status, "skipped_already_marked")
 
 

@@ -352,11 +352,15 @@ def _marking_on_calculate_error(self, err):
     QMessageBox.critical(self, "计算失败", str(err))
 
 
+def _marking_prepare_gamepad_action(self, title: str, body: str) -> None:
+    QMessageBox.information(self, title, body)
+    self.showMinimized()
+
+
 def _marking_execute(self):
     if not self._marking_cached_targets:
         QMessageBox.warning(self, "提示", "请先计算并确认存在待标记项。")
         return
-    delay = float(self.marking_delay_edit.text() or "3")
     paths = _marking_paths(self)
     self.marking_execute_btn.setEnabled(False)
     self.marking_calc_btn.setEnabled(False)
@@ -378,14 +382,18 @@ def _marking_execute(self):
 
         return executor.execute_targets(
             self._marking_cached_targets,
-            switch_delay=delay,
             on_progress=on_progress,
         )
 
+    self._marking_prepare_gamepad_action(
+        "执行标记准备",
+        "点击 OK 后程序会最小化并开始自动标记。\n\n"
+        "请切换至游戏的驱动/卡带仓库页面，并确保当前选中第一排第一个格子。\n"
+        "程序会在短暂倒计时后接管虚拟手柄。",
+    )
     self._marking_exec_worker = MarkingWorkerThread(target=_run, parent=self)
     self._marking_exec_worker.finished_ok.connect(self._marking_on_execute_done)
     self._marking_exec_worker.error.connect(self._marking_on_execute_error)
-    self.showMinimized()
     self._register_scan_hotkeys("marking")
     self._marking_exec_worker.start()
 
@@ -466,7 +474,6 @@ def _marking_rollback(self):
     if self._marking_session is None:
         QMessageBox.warning(self, "回滚", "请先加载与当时一致的扫描会话。")
         return
-    delay = float(self.marking_delay_edit.text() or "3")
 
     def _run(worker: MarkingWorkerThread):
         executor = MarkingExecutor(
@@ -476,14 +483,19 @@ def _marking_rollback(self):
             macros_path=paths["macros"],
         )
         worker.executor = executor
-        return executor.rollback_entries(candidates, switch_delay=delay)
+        return executor.rollback_entries(candidates)
 
+    self._marking_prepare_gamepad_action(
+        "回滚标记准备",
+        "点击 OK 后程序会最小化并开始回滚上次标记。\n\n"
+        "请切换至游戏的驱动/卡带仓库页面，并确保当前选中第一排第一个格子。\n"
+        "程序会在短暂倒计时后接管虚拟手柄。",
+    )
     self.marking_rollback_btn.setEnabled(False)
     self.marking_stop_btn.setEnabled(True)
     self._marking_rollback_worker = MarkingWorkerThread(target=_run, parent=self)
     self._marking_rollback_worker.finished_ok.connect(lambda results: self._marking_on_rollback_done(session, store, results))
     self._marking_rollback_worker.error.connect(self._marking_on_rollback_error)
-    self.showMinimized()
     self._register_scan_hotkeys("marking")
     self._marking_rollback_worker.start()
 
