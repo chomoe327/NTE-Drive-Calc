@@ -95,9 +95,13 @@ class GamepadScanner:
         logger.info(f"[{counter:04d}] 捕获成功")
         return True
 
-    def push_left_joystick(self, x, y, *, fast: bool = False):
-        press_ms = 0.05 if fast else 0.10
-        settle_ms = 0.08 if fast else 0.30
+    def push_left_joystick(self, x, y, *, pace: str = "scan"):
+        if pace == "marking":
+            press_ms, settle_ms = 0.09, 0.18
+        elif pace == "fast":
+            press_ms, settle_ms = 0.05, 0.08
+        else:
+            press_ms, settle_ms = 0.10, 0.30
         self.gamepad.left_joystick_float(x_value_float=x, y_value_float=y)
         self.gamepad.update()
         time.sleep(press_ms)
@@ -105,33 +109,48 @@ class GamepadScanner:
         self.gamepad.update()
         time.sleep(settle_ms)
 
-    def _apply_moves(self, moves, *, fast: bool = False):
+    def _apply_moves(self, moves, *, pace: str = "scan"):
         for move in moves:
+            if self._stopped:
+                return
             if move == "R":
-                self.push_left_joystick(1.0, 0.0, fast=fast)
+                self.push_left_joystick(1.0, 0.0, pace=pace)
             elif move == "L":
-                self.push_left_joystick(-1.0, 0.0, fast=fast)
+                self.push_left_joystick(-1.0, 0.0, pace=pace)
             elif move == "D":
-                self.push_left_joystick(0.0, -1.0, fast=fast)
+                self.push_left_joystick(0.0, -1.0, pace=pace)
             elif move == "U":
-                self.push_left_joystick(0.0, 1.0, fast=fast)
+                self.push_left_joystick(0.0, 1.0, pace=pace)
+
+    def anchor_to_first_cell(self, total_drives: int, cols: int | None = None) -> None:
+        """Burst left/up to return selection to the top-left inventory cell."""
+        cols = cols or self.cols
+        rows = (int(total_drives) + cols - 1) // cols
+        moves = ["L"] * (cols + 2) + ["U"] * (rows + 2)
+        logger.info(f"自动归位到第一格（{len(moves)} 步）")
+        self.wake_inventory_selection(pace="marking")
+        self._apply_moves(moves, pace="marking")
+        time.sleep(0.3)
 
     def _generate_path(self, total_drives: int) -> list:
         from src.scanner.grid_navigation import generate_path_commands
 
         return generate_path_commands(total_drives, self.cols)
 
-    def wait_for_handoff(self) -> None:
+    def wait_for_handoff(self, *, for_marking: bool = False) -> None:
         logger.warning("\n" + "=" * 50)
         logger.warning("虚拟手柄已就位，将在 3 秒后接管控制，请切回游戏")
-        logger.warning("请确保此时已选中第一排第一个驱动/卡带")
+        if for_marking:
+            logger.warning("请停留在驱动/卡带仓库页面，程序将自动归位到第一格")
+        else:
+            logger.warning("请确保此时已选中第一排第一个驱动/卡带")
         logger.warning("=" * 50)
         time.sleep(self.HANDOFF_DELAY_SEC)
 
-    def wake_inventory_selection(self) -> None:
+    def wake_inventory_selection(self, *, pace: str = "scan") -> None:
         logger.info("发送撞墙唤醒信号，确认背包选中态")
-        self.push_left_joystick(-1.0, 0.0)
-        time.sleep(0.5)
+        self.push_left_joystick(-1.0, 0.0, pace=pace)
+        time.sleep(0.35 if pace == "marking" else 0.5)
 
     def start_scan(self, total_drives=None):
         self.wait_for_handoff()
@@ -145,7 +164,7 @@ class GamepadScanner:
         logger.info("\n====== 发送撞墙唤醒信号 ======")
         self.wake_inventory_selection()
 
-        logger.info(f"\n====== S 形遍历启动（总目标 {total_drives} 个）======")
+        logger.info(f"\n====== S 形逐格遍历启动（总目标 {total_drives} 个）======")
         self._prepare_temp_output()
         path_commands = self._generate_path(total_drives)
         captured_count = 0
@@ -154,7 +173,7 @@ class GamepadScanner:
             for index, moves in enumerate(path_commands, 1):
                 if self._stopped:
                     break
-                self._apply_moves(moves)
+                self._apply_moves(moves, pace="scan")
                 if self._stopped:
                     break
                 self.capture_panel(sct, index)

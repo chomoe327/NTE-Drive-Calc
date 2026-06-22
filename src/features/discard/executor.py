@@ -175,12 +175,23 @@ class MarkingExecutor:
             self.session.total_drives,
             self.session.cols,
         )
-        self.scanner._apply_moves(moves, fast=True)
+        self.scanner._apply_moves(moves, pace="marking")
+        time.sleep(0.2)
 
-    def _prepare_at_first_cell(self) -> None:
+    def _prepare_at_first_cell(self, sct) -> None:
         assert self.scanner is not None
-        self.scanner.wake_inventory_selection()
-        time.sleep(0.35)
+        self.scanner.anchor_to_first_cell(self.session.total_drives, self.session.cols)
+        entry = self.session.entry_by_index(1)
+        if entry is None:
+            return
+        image_bgr = self._capture_bgr(sct)
+        try:
+            self._verify_entry_at_current_cell(image_bgr, entry)
+        except InventoryChangedError as exc:
+            raise InventoryChangedError(
+                f"自动归位后第 1 格校验失败（{exc}）。"
+                "请确认在仓库页面且背包与扫描会话一致。"
+            ) from exc
 
     def _already_marked(self, image_bgr: np.ndarray, action: str) -> bool:
         states = self.detector.detect_from_bgr(image_bgr)
@@ -203,12 +214,12 @@ class MarkingExecutor:
         self._connect()
         assert self.scanner is not None
         self._stopped = False
-        self.scanner.wait_for_handoff()
+        self.scanner.wait_for_handoff(for_marking=True)
         results: list[MarkStepResult] = []
         total = len(targets)
         current_index = 1
         with mss.mss() as sct:
-            self._prepare_at_first_cell()
+            self._prepare_at_first_cell(sct)
             for idx, target in enumerate(targets, 1):
                 if self._stopped:
                     break
@@ -221,7 +232,7 @@ class MarkingExecutor:
                     continue
                 self._navigate_between(current_index, target.scan_index)
                 current_index = target.scan_index
-                time.sleep(0.25)
+                time.sleep(0.35)
                 image_bgr = self._capture_bgr(sct)
                 try:
                     self._verify_entry_at_current_cell(image_bgr, entry)
@@ -254,12 +265,12 @@ class MarkingExecutor:
         self._connect()
         assert self.scanner is not None
         self._stopped = False
-        self.scanner.wait_for_handoff()
+        self.scanner.wait_for_handoff(for_marking=True)
         results: list[MarkStepResult] = []
         total = len(entries)
         current_index = 1
         with mss.mss() as sct:
-            self._prepare_at_first_cell()
+            self._prepare_at_first_cell(sct)
             for idx, entry in enumerate(entries, 1):
                 if self._stopped:
                     break
@@ -268,7 +279,7 @@ class MarkingExecutor:
                     continue
                 self._navigate_between(current_index, entry.scan_index)
                 current_index = entry.scan_index
-                time.sleep(0.25)
+                time.sleep(0.35)
                 image_bgr = self._capture_bgr(sct)
                 self._verify_entry_at_current_cell(image_bgr, session_entry)
                 if not self._already_marked(image_bgr, entry.action):

@@ -1,5 +1,12 @@
 # 全量扫描背包格子的 S 形路径生成。
-"""Grid navigation helpers for full-inventory gamepad traversal."""
+"""Grid navigation helpers for inventory gamepad traversal.
+
+Full scan (`GamepadScanner.start_scan`) uses `generate_path_commands`: one move
+list per cell, visiting every slot in S-curve order.
+
+Blind marking (`MarkingExecutor`) uses `moves_between_scan_indices`: direct D/U
+then R/L between targets without walking intermediate cells.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +27,7 @@ def generate_scan_order(total_drives: int, cols: int = COLS) -> list[tuple[int, 
 
 
 def generate_path_commands(total_drives: int, cols: int = COLS) -> list[list[str]]:
+    """Incremental S-curve steps for full inventory scan (one entry per cell)."""
     commands: list[list[str]] = []
     curr_row, curr_col = 0, 0
     for target_row, target_col in generate_scan_order(total_drives, cols):
@@ -46,40 +54,53 @@ def moves_for_scan_index(scan_index: int, total_drives: int, cols: int = COLS) -
 _INVERT_MOVE = {"R": "L", "L": "R", "D": "U", "U": "D"}
 
 
+def scan_index_for_position(
+    row: int,
+    col: int,
+    total_drives: int,
+    cols: int = COLS,
+) -> int:
+    for index, position in enumerate(generate_scan_order(total_drives, cols), 1):
+        if position == (row, col):
+            return index
+    raise ValueError(f"坐标 ({row}, {col}) 不在扫描网格中")
+
+
 def moves_between_scan_indices(
     from_index: int,
     to_index: int,
     total_drives: int,
     cols: int = COLS,
 ) -> list[str]:
-    """Direct grid moves between two slots (horizontal first, then vertical)."""
+    """Direct grid navigation for blind marking only (D/U first, then R/L)."""
     if from_index == to_index:
         return []
     if not 1 <= from_index <= total_drives or not 1 <= to_index <= total_drives:
         raise ValueError(f"scan_index 超出范围 1-{total_drives}")
     order = generate_scan_order(total_drives, cols)
-    from_row, from_col = order[from_index - 1]
-    to_row, to_col = order[to_index - 1]
+    row, col = order[from_index - 1]
+    target_row, target_col = order[to_index - 1]
     moves: list[str] = []
-    row, col = from_row, from_col
+
     if to_index > from_index:
-        while col < to_col:
-            moves.append("R")
-            col += 1
-        while col > to_col:
-            moves.append("L")
-            col -= 1
-        while row < to_row:
+        while row < target_row:
             moves.append("D")
             row += 1
+        while col < target_col:
+            moves.append("R")
+            col += 1
+        while col > target_col:
+            moves.append("L")
+            col -= 1
         return moves
-    while row > to_row:
+
+    while row > target_row:
         moves.append("U")
         row -= 1
-    while col > to_col:
+    while col > target_col:
         moves.append("L")
         col -= 1
-    while col < to_col:
+    while col < target_col:
         moves.append("R")
         col += 1
     return moves
@@ -106,3 +127,41 @@ def moves_between_scan_indices_along_scan_path(
     for step in range(to_index, from_index):
         moves.extend(paths[step])
     return [_INVERT_MOVE[move] for move in reversed(moves)]
+
+
+def moves_between_scan_indices_horizontal_first(
+    from_index: int,
+    to_index: int,
+    total_drives: int,
+    cols: int = COLS,
+) -> list[str]:
+    """Horizontal moves before vertical (kept for comparison / fallback experiments)."""
+    if from_index == to_index:
+        return []
+    if not 1 <= from_index <= total_drives or not 1 <= to_index <= total_drives:
+        raise ValueError(f"scan_index 超出范围 1-{total_drives}")
+    order = generate_scan_order(total_drives, cols)
+    row, col = order[from_index - 1]
+    target_row, target_col = order[to_index - 1]
+    moves: list[str] = []
+    if to_index > from_index:
+        while col < target_col:
+            moves.append("R")
+            col += 1
+        while col > target_col:
+            moves.append("L")
+            col -= 1
+        while row < target_row:
+            moves.append("D")
+            row += 1
+        return moves
+    while row > target_row:
+        moves.append("U")
+        row -= 1
+    while col > target_col:
+        moves.append("L")
+        col -= 1
+    while col < target_col:
+        moves.append("R")
+        col += 1
+    return moves
