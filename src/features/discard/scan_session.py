@@ -79,13 +79,17 @@ def build_session_from_inventory(
     *,
     source_filenames: dict[int, str] | None = None,
 ) -> ScanSession:
-    drives = [item for item in inventory if isinstance(item, dict) and item.get("item_type") == "drive"]
-    missing = [item.get("uid", "?") for item in drives if not item.get("scan_index")]
+    items = [
+        item
+        for item in inventory
+        if isinstance(item, dict) and item.get("item_type") in ("drive", "tape")
+    ]
+    missing = [item.get("uid", "?") for item in items if not item.get("scan_index")]
     if missing:
-        raise ValueError("库存中存在缺少 scan_index 的驱动，请先进行全量扫描。")
+        raise ValueError("库存中存在缺少 scan_index 的驱动/卡带，请先进行全量扫描。")
 
     entries: list[ScanSessionEntry] = []
-    for item in drives:
+    for item in items:
         scan_index = int(item["scan_index"])
         filenames = source_filenames or {}
         entries.append(
@@ -93,7 +97,7 @@ def build_session_from_inventory(
                 scan_index=scan_index,
                 uid=str(item.get("uid") or ""),
                 quality=str(item.get("quality") or "Gold"),
-                item_type="drive",
+                item_type=str(item.get("item_type") or "drive"),
                 signature=signature_from_item_dict(item),
                 source_filename=filenames.get(scan_index),
             )
@@ -137,4 +141,4 @@ def save_session(path: Path, session: ScanSession) -> None:
 
 def verify_signature(expected: str, actual: str) -> None:
     if expected != actual:
-        raise InventoryChangedError("当前格子驱动与扫描快照不一致，背包可能已变动。")
+        raise InventoryChangedError("当前格子装备与扫描快照不一致，背包可能已变动。")

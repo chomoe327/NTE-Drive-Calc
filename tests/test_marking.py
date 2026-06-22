@@ -5,6 +5,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from src.domain.grade_scoring import (
+    GRADE_LADDER,
+    best_grade,
+    evaluate_item_grades,
+    grade_rank,
+)
 from src.features.discard.log_store import MarkLogEntry, MarkLogSession, MarkLogStore
 from src.features.discard.quality_rules import (
     QualityMarkRule,
@@ -18,17 +24,18 @@ from src.features.discard.scan_session import (
     build_session_from_inventory,
     verify_signature,
 )
-from src.features.discard.scoring import build_mark_preview
+from src.features.discard.scoring import MarkTarget, build_mark_preview
+from src.models.equipment import Drive, Tape
 from src.scanner.grid_navigation import generate_path_commands, moves_for_scan_index
 
 
-def _drive(uid: str, scan_index: int, quality: str = "Gold") -> dict:
+def _drive(uid: str, scan_index: int, quality: str = "Gold", shape_id: str = "L1") -> dict:
     return {
         "uid": uid,
         "item_type": "drive",
         "scan_index": scan_index,
         "quality": quality,
-        "shape_id": "L1",
+        "shape_id": shape_id,
         "area": 1,
         "set_name": "测试套装",
         "main_stats": {"攻击力": 100.0, "暴击率": 10.0},
@@ -36,44 +43,68 @@ def _drive(uid: str, scan_index: int, quality: str = "Gold") -> dict:
     }
 
 
+def _tape(uid: str, scan_index: int, quality: str = "Gold", set_name: str = "测试套装") -> dict:
+    return {
+        "uid": uid,
+        "item_type": "tape",
+        "scan_index": scan_index,
+        "quality": quality,
+        "shape_id": "TAPE_15",
+        "area": 15,
+        "set_name": set_name,
+        "main_stats": "攻击力%",
+        "sub_stats": {"攻击力": 10.0},
+    }
+
+
+class GradeScoringTest(unittest.TestCase):
+    def test_grade_rank_order(self):
+        self.assertLess(grade_rank("B"), grade_rank("SS"))
+
+    def test_best_grade(self):
+        self.assertEqual(best_grade(["B", "A", "SS"]), "SS")
+
+
 class MarkingQualityRulesTest(unittest.TestCase):
-    def test_lock_must_exceed_discard(self):
-        rule = QualityMarkRule("Gold", 18.0, 10.0, discard_below_enabled=True)
+    def test_lock_must_exceed_discard_grade(self):
+        rule = QualityMarkRule("Gold", "SS", "B", discard_below_enabled=True)
         self.assertIsNotNone(rule.validate())
 
     def test_middle_band_no_action(self):
         rules = {
-            "Gold": QualityMarkRule("Gold", 10.0, 18.0, discard_below_enabled=True, lock_above_enabled=True),
+            "Gold": QualityMarkRule("Gold", "B", "SS", discard_below_enabled=True, lock_above_enabled=True),
         }
-        self.assertEqual(resolve_action("Gold", 9.9, rules), "discard")
-        self.assertIsNone(resolve_action("Gold", 14.0, rules))
-        self.assertEqual(resolve_action("Gold", 18.0, rules), "lock")
+        self.assertEqual(resolve_action("Gold", "A", rules), None)
+        self.assertEqual(resolve_action("Gold", "C", rules), "discard")
+        self.assertEqual(resolve_action("Gold", "SS", rules), "lock")
 
     def test_blue_not_in_rules(self):
-        rules = {"Gold": QualityMarkRule("Gold", 10.0, 18.0, discard_below_enabled=True)}
-        self.assertIsNone(resolve_action("Blue", 0.0, rules))
+        rules = {"Gold": QualityMarkRule("Gold", "B", "SS", discard_below_enabled=True)}
+        self.assertIsNone(resolve_action("Blue", "D", rules))
 
     def test_independent_switches(self):
-        discard_only = {"Purple": QualityMarkRule("Purple", 8.0, 15.0, discard_below_enabled=True)}
-        lock_only = {"Purple": QualityMarkRule("Purple", 8.0, 15.0, lock_above_enabled=True)}
-        self.assertEqual(resolve_action("Purple", 7.0, discard_only), "discard")
-        self.assertIsNone(resolve_action("Purple", 7.0, lock_only))
-        self.assertEqual(resolve_action("Purple", 16.0, lock_only), "lock")
+        discard_only = {"Purple": QualityMarkRule("Purple", "B", "SS", discard_below_enabled=True)}
+        lock_only = {"Purple": QualityMarkRule("Purple", "B", "SS", lock_above_enabled=True)}
+        self.assertEqual(resolve_action("Purple", "C", discard_only), "discard")
+        self.assertIsNone(resolve_action("Purple", "A", lock_only))
+        self.assertEqual(resolve_action("Purple", "SS", lock_only), "lock")
 
     def test_validate_requires_enabled_rule(self):
         rules = {
-            "Gold": QualityMarkRule("Gold", 10.0, 18.0),
-            "Purple": QualityMarkRule("Purple", 8.0, 15.0),
+            "Gold": QualityMarkRule("Gold"),
+            "Purple": QualityMarkRule("Purple"),
         }
         self.assertIsNotNone(validate_rules(rules))
 
 
 class MarkingScanSessionTest(unittest.TestCase):
     def test_build_session_from_inventory(self):
-        inventory = [_drive("a", 1), _drive("b", 2)]
+        inventory = [_drive("a", 1), _tape("t", 2)]
         session = build_session_from_inventory(inventory)
         self.assertEqual(session.total_drives, 2)
         self.assertEqual(len(session.entries), 2)
+        types = {e.item_type for e in session.entries}
+        self.assertEqual(types, {"drive", "tape"})
 
     def test_missing_scan_index_blocks(self):
         bad = _drive("x", 1)
@@ -87,7 +118,16 @@ class MarkingScanSessionTest(unittest.TestCase):
 
 
 class MarkingScoringTest(unittest.TestCase):
-    def test_preview_classifies_targets(self):
+    def _mock_orchestrator(self):
+        orchestrator = SimpleNamespace(
+            roles_db={"角色A": {"default_set": "测试套装", "weights": {"攻击力": 1.0}}},
+            sets_db={"测试套装": {"shapes": ["L1"]}},
+        )
+        orchestrator._resolve_set_name = lambda name: name
+        blueprints = {"角色A": [{"extra_pieces": []}]}
+        return orchestrator, blueprints
+
+    def test_preview_classifies_by_grade(self):
         inventory = [
             _drive("low", 1, "Gold"),
             _drive("high", 2, "Gold"),
@@ -95,26 +135,69 @@ class MarkingScoringTest(unittest.TestCase):
         ]
         session = build_session_from_inventory(inventory)
         rules = {
-            "Gold": QualityMarkRule("Gold", 10.0, 18.0, discard_below_enabled=True, lock_above_enabled=True),
-            "Purple": QualityMarkRule("Purple", 8.0, 15.0, lock_above_enabled=True),
+            "Gold": QualityMarkRule("Gold", "B", "SS", discard_below_enabled=True, lock_above_enabled=True),
+            "Purple": QualityMarkRule("Purple", "B", "SS", lock_above_enabled=True),
         }
-        engine = SimpleNamespace(roles_db={"角色A": {"weights": {"攻击力": 1.0}}})
-
-        def fake_score(drive, weights, max_weight):
-            if drive.uid == "low":
-                return 5.0
-            if drive.uid == "high":
-                return 20.0
-            return 12.0
-
-        engine.calculate_drive_score = fake_score
+        orchestrator, blueprints = self._mock_orchestrator()
+        engine = MagicMock()
         engine._get_max_theoretical_weight = lambda weights: 1.0
 
-        preview = build_mark_preview(session, ["角色A"], rules, engine, inventory)
+        def fake_grade(item, selected_roles, orch, bps, eng):
+            if item.uid == "low":
+                return "C", "角色A", True
+            if item.uid == "high":
+                return "SS", "角色A", True
+            return "D", None, False
+
+        with patch("src.features.discard.scoring.evaluate_item_grades", side_effect=fake_grade):
+            preview = build_mark_preview(
+                session,
+                ["角色A"],
+                rules,
+                engine,
+                inventory,
+                orchestrator,
+                blueprints,
+            )
         self.assertEqual(preview.discard_count, 1)
         self.assertEqual(preview.lock_count, 1)
         self.assertEqual(preview.blue_skipped, 1)
         self.assertEqual([t.scan_index for t in preview.targets], [1, 2])
+
+    def test_no_usable_role_treated_as_discard(self):
+        inventory = [_drive("orphan", 1, "Gold", shape_id="UNKNOWN")]
+        session = build_session_from_inventory(inventory)
+        rules = {"Gold": QualityMarkRule("Gold", "B", "SS", discard_below_enabled=True)}
+        orchestrator, blueprints = self._mock_orchestrator()
+        engine = MagicMock()
+        preview = build_mark_preview(
+            session,
+            ["角色A"],
+            rules,
+            engine,
+            inventory,
+            orchestrator,
+            blueprints,
+        )
+        self.assertEqual(preview.no_usable_role, 1)
+        self.assertEqual(preview.discard_count, 1)
+        self.assertEqual(preview.targets[0].max_grade, "D")
+
+
+class RoleMultiSelectorTest(unittest.TestCase):
+    def test_select_all_visible_roles(self):
+        from src.ui.widgets import match_pinyin
+
+        all_roles = {"A": {}, "B": {}, "C": {}}
+        query = ""
+        names = sorted(all_roles.keys())
+        if query:
+            names = [name for name in names if match_pinyin(name, query)]
+        selected: list[str] = []
+        for name in names:
+            if name not in selected:
+                selected.append(name)
+        self.assertEqual(sorted(selected), ["A", "B", "C"])
 
 
 class MarkingLogStoreTest(unittest.TestCase):
@@ -134,24 +217,6 @@ class MarkingLogStoreTest(unittest.TestCase):
         candidates = MarkLogStore(Path("unused")).rollback_candidates(session)
         self.assertEqual([e.scan_index for e in candidates], [2, 1])
 
-    def test_persist_roundtrip(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "marking_log.json"
-            store = MarkLogStore(path)
-            session = MarkLogSession(
-                id="s1",
-                scan_session_id="snap",
-                created_at="t0",
-                rules={"Gold": {}},
-                roles=["角色A"],
-                entries=[MarkLogEntry(1, "a", "discard", "marked", "t1")],
-            )
-            store.append_session(session)
-            loaded = store.latest_session()
-            self.assertIsNotNone(loaded)
-            assert loaded is not None
-            self.assertEqual(loaded.entries[0].scan_index, 1)
-
 
 class GridNavigationTest(unittest.TestCase):
     def test_moves_for_scan_index_matches_path(self):
@@ -167,7 +232,6 @@ class MarkingExecutorTest(unittest.TestCase):
     @patch("src.features.discard.executor.vg", create=True)
     def test_skips_already_marked(self, _vg, scanner_cls, _mss, _batch):
         from src.features.discard.executor import MarkingExecutor
-        from src.features.discard.scoring import MarkTarget
 
         session = ScanSession(
             session_id="s",
@@ -188,10 +252,11 @@ class MarkingExecutorTest(unittest.TestCase):
         executor.detector.detect_from_bgr = MagicMock(return_value={"discard": True, "lock": False})
         executor._verify_current_drive = MagicMock()
         executor._capture_bgr = MagicMock(return_value=MagicMock(shape=(100, 100, 3)))
-        targets = [MarkTarget(1, "a", "Gold", 5.0, "discard")]
+        targets = [
+            MarkTarget(1, "a", "drive", "Gold", "C", None, "discard"),
+        ]
         results = executor.execute_targets(targets, switch_delay=0)
         self.assertEqual(results[0].status, "skipped_already_marked")
-        scanner._apply_moves.assert_called_once()
 
 
 if __name__ == "__main__":

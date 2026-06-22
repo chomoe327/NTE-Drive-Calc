@@ -404,46 +404,11 @@ def _get_identify_blueprints(self):
     return self._identify_blueprint_cache
 
 def _run_identify_item(self,item):
+    from src.domain.grade_scoring import build_identify_rows
+
     orchestrator,blueprints=self._get_identify_blueprints()
     scoring=ScoringEngine(str(runtime.CONFIG_DIR))
-    rows=[]
-    if isinstance(item,Tape):
-        item_set=orchestrator._resolve_set_name(item.set_name)
-        item.set_name=item_set
-    for role_name,role_data in orchestrator.roles_db.items():
-        role_bps=blueprints.get(role_name,[])
-        if not role_bps:
-            continue
-        target_set=orchestrator._resolve_set_name(role_data.get("default_set",""))
-        weights=role_data.get("weights",{})
-        max_weight=scoring._get_max_theoretical_weight(weights)
-        if isinstance(item,Tape):
-            if item.set_name!=target_set:
-                continue
-            score=scoring.calculate_cartridge_score(item,weights,max_weight)
-            match_desc="套装匹配"
-            area=15
-        else:
-            set_shapes=orchestrator.sets_db[target_set]["shapes"]
-            in_set=item.shape_id in set_shapes
-            in_extra=any(item.shape_id in bp.get("extra_pieces",[]) for bp in role_bps)
-            if not in_set and not in_extra:
-                continue
-            score=scoring.calculate_drive_score(item,weights,max_weight)
-            match_desc="套装位" if in_set else "散件位"
-            area=item.area
-        grade=scoring.get_grade_tag(score,area)
-        max_score=area*10.0
-        rows.append({
-            "role":role_name,
-            "set":target_set,
-            "score":score,
-            "grade":grade,
-            "percent":round(score/max_score*100,1) if max_score else 0,
-            "match":match_desc,
-            "weights":weights,
-        })
-    rows.sort(key=lambda r:r["score"],reverse=True)
+    rows=build_identify_rows(item, orchestrator, blueprints, scoring)
     return {"item":item,"rows":rows}
 
 def _run_identify_items(self,items):

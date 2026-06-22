@@ -1,5 +1,5 @@
-# 金/紫双阈值弃置与上锁规则。
-"""Per-quality discard/lock threshold rules for blind marking."""
+# 金/紫双阈值弃置与上锁规则（等级制）。
+"""Per-quality discard/lock grade rules for blind marking."""
 
 from __future__ import annotations
 
@@ -8,39 +8,45 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
+from src.domain.grade_scoring import GRADE_LADDER, UI_GRADE_OPTIONS, grade_rank
+
 Quality = Literal["Gold", "Purple"]
 Action = Literal["discard", "lock"]
+Grade = str
 
 
 @dataclass
 class QualityMarkRule:
     quality: Quality
-    discard_threshold: float = 10.0
-    lock_threshold: float = 18.0
+    discard_grade: Grade = "B"
+    lock_grade: Grade = "SS"
     discard_below_enabled: bool = False
     lock_above_enabled: bool = False
 
     def validate(self) -> str | None:
-        if self.lock_threshold <= self.discard_threshold:
-            return "上锁阈值必须大于弃置阈值"
+        if self.discard_grade not in GRADE_LADDER or self.lock_grade not in GRADE_LADDER:
+            return "等级必须在 D~ACE 范围内"
+        if grade_rank(self.lock_grade) <= grade_rank(self.discard_grade):
+            return "上锁等级必须高于弃置等级"
         if not self.discard_below_enabled and not self.lock_above_enabled:
             return "至少开启弃置或上锁其中一项"
         return None
 
 
 DEFAULT_RULES: dict[Quality, QualityMarkRule] = {
-    "Gold": QualityMarkRule("Gold", 10.0, 18.0, discard_below_enabled=True, lock_above_enabled=False),
-    "Purple": QualityMarkRule("Purple", 8.0, 15.0, discard_below_enabled=False, lock_above_enabled=True),
+    "Gold": QualityMarkRule("Gold", "B", "SS", discard_below_enabled=True, lock_above_enabled=False),
+    "Purple": QualityMarkRule("Purple", "C", "S", discard_below_enabled=False, lock_above_enabled=True),
 }
 
 
-def resolve_action(quality: str, max_score: float, rules: dict[Quality, QualityMarkRule]) -> Action | None:
+def resolve_action(quality: str, max_grade: str, rules: dict[Quality, QualityMarkRule]) -> Action | None:
     rule = rules.get(quality)  # type: ignore[arg-type]
     if rule is None:
         return None
-    if rule.discard_below_enabled and max_score < rule.discard_threshold:
+    current = grade_rank(max_grade)
+    if rule.discard_below_enabled and current < grade_rank(rule.discard_grade):
         return "discard"
-    if rule.lock_above_enabled and max_score >= rule.lock_threshold:
+    if rule.lock_above_enabled and current >= grade_rank(rule.lock_grade):
         return "lock"
     return None
 
@@ -58,6 +64,13 @@ def validate_rules(rules: dict[Quality, QualityMarkRule]) -> str | None:
     return None
 
 
+def _grade_from_entry(entry: dict, key: str, default: str) -> str:
+    value = entry.get(key)
+    if isinstance(value, str) and value.upper() in GRADE_LADDER:
+        return value.upper()
+    return default
+
+
 def load_rules(path: Path) -> dict[Quality, QualityMarkRule]:
     if not path.exists():
         return {k: QualityMarkRule(**asdict(v)) for k, v in DEFAULT_RULES.items()}
@@ -71,8 +84,8 @@ def load_rules(path: Path) -> dict[Quality, QualityMarkRule]:
         default = DEFAULT_RULES[quality]
         rules[quality] = QualityMarkRule(
             quality=quality,
-            discard_threshold=float(entry.get("discard_threshold", default.discard_threshold)),
-            lock_threshold=float(entry.get("lock_threshold", default.lock_threshold)),
+            discard_grade=_grade_from_entry(entry, "discard_grade", default.discard_grade),
+            lock_grade=_grade_from_entry(entry, "lock_grade", default.lock_grade),
             discard_below_enabled=bool(entry.get("discard_below_enabled", default.discard_below_enabled)),
             lock_above_enabled=bool(entry.get("lock_above_enabled", default.lock_above_enabled)),
         )

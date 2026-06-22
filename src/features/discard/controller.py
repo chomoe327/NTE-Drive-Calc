@@ -48,11 +48,24 @@ __all__ = [
     "_marking_on_rollback_error",
     "_marking_update_session_status",
     "_marking_render_preview",
+    "_marking_get_blueprints",
 ]
 
 
 def install_methods(app_module, window_cls):
     _install_main_window_methods(app_module, window_cls, __all__, globals())
+
+
+def _marking_get_blueprints(self):
+    if getattr(self, "_marking_blueprint_cache", None):
+        return self._marking_blueprint_cache
+    from src.solver.orchestrator import NTEPipelineOrchestrator
+
+    orchestrator = NTEPipelineOrchestrator(config_dir=str(runtime.CONFIG_DIR))
+    roles = list(orchestrator.roles_db.keys())
+    blueprints = orchestrator.solve_blueprints(roles)
+    self._marking_blueprint_cache = (orchestrator, blueprints)
+    return self._marking_blueprint_cache
 
 
 def _marking_paths(self):
@@ -73,6 +86,7 @@ def _page_marking(self):
 def _refresh_marking(self):
     if not hasattr(self, "marking_role_selector"):
         return
+    self._marking_blueprint_cache = None
     self.marking_role_selector.load_roles(getattr(self, "roles_db", {}) or {})
     self._marking_set_rules_to_ui(load_rules(_marking_paths(self)["rules"]))
     session = load_session(_marking_paths(self)["session"])
@@ -87,8 +101,14 @@ def _marking_set_rules_to_ui(self, rules: dict[str, QualityMarkRule]):
         row = widgets.get(quality)
         if not row:
             continue
-        row["discard_threshold"].setText(f"{rule.discard_threshold:.2f}".rstrip("0").rstrip("."))
-        row["lock_threshold"].setText(f"{rule.lock_threshold:.2f}".rstrip("0").rstrip("."))
+        discard_combo = row["discard_grade"]
+        lock_combo = row["lock_grade"]
+        discard_idx = discard_combo.findText(rule.discard_grade)
+        lock_idx = lock_combo.findText(rule.lock_grade)
+        if discard_idx >= 0:
+            discard_combo.setCurrentIndex(discard_idx)
+        if lock_idx >= 0:
+            lock_combo.setCurrentIndex(lock_idx)
         row["discard_below_enabled"].setChecked(rule.discard_below_enabled)
         row["lock_above_enabled"].setChecked(rule.lock_above_enabled)
     self._marking_on_rules_changed()
@@ -101,8 +121,8 @@ def _marking_get_rules_from_ui(self) -> dict[str, QualityMarkRule]:
         row = widgets.get(quality, {})
         rules[quality] = QualityMarkRule(
             quality=quality,  # type: ignore[arg-type]
-            discard_threshold=float(row["discard_threshold"].text() or 0),
-            lock_threshold=float(row["lock_threshold"].text() or 0),
+            discard_grade=str(row["discard_grade"].currentText() or "B"),
+            lock_grade=str(row["lock_grade"].currentText() or "SS"),
             discard_below_enabled=bool(row["discard_below_enabled"].isChecked()),
             lock_above_enabled=bool(row["lock_above_enabled"].isChecked()),
         )
@@ -144,7 +164,7 @@ def _marking_update_session_status(self):
         self.marking_session_status.setStyleSheet("color:#d2991d;font-size:12px;border:none")
         return
     self.marking_session_status.setText(
-        f"会话就绪：共 {session.total_drives} 个驱动格，快照 ID {session.session_id[:8]}"
+        f"会话就绪：共 {session.total_drives} 格（驱动/卡带），快照 ID {session.session_id[:8]}"
     )
     self.marking_session_status.setStyleSheet("color:#3fb950;font-size:12px;border:none")
     self._marking_on_rules_changed()
@@ -166,7 +186,7 @@ def _marking_load_inventory(self):
         self._marking_inventory = inventory
         self._marking_update_session_status()
         self._marking_invalidate_preview()
-        QMessageBox.information(self, "读取完成", f"已加载 {session.total_drives} 个驱动格快照。")
+        QMessageBox.information(self, "读取完成", f"已加载 {session.total_drives} 格装备快照（驱动/卡带）。")
     except Exception as exc:
         QMessageBox.critical(self, "读取失败", str(exc))
 
@@ -188,7 +208,7 @@ def _marking_start_full_scan(self):
         self,
         "全量扫描准备",
         "点击 OK 后程序会最小化并开始全量扫描。\n\n"
-        "请切换至游戏的驱动仓库页面，并确保当前选中第一排第一个驱动。",
+        "请切换至游戏的驱动/卡带仓库页面，并确保当前选中第一排第一个格子。",
     )
     self.showMinimized()
     from src.app.workers import GamepadScanWorkerThread
@@ -279,7 +299,16 @@ def _marking_calculate(self):
         inventory = self._marking_inventory
         if not inventory:
             inventory = read_json(runtime.OUTPUT_FILE, default=[]) or []
-        return build_mark_preview(self._marking_session, selected, rules, self.scoring_engine, inventory)
+        orchestrator, blueprints = self._marking_get_blueprints()
+        return build_mark_preview(
+            self._marking_session,
+            selected,
+            rules,
+            self.scoring_engine,
+            inventory,
+            orchestrator,
+            blueprints,
+        )
 
     self._marking_calc_worker = WorkerThread(target=_run, parent=self)
     self._marking_calc_worker.result_ready.connect(self._marking_on_calculate_done)
@@ -288,18 +317,23 @@ def _marking_calculate(self):
 
 
 def _marking_render_preview(self, preview: MarkPreview):
+    from src.features.discard.scoring import ITEM_LABELS
+
     self.marking_preview_summary.setText(
         f"将标记弃置 {preview.discard_count} 个，将标记上锁 {preview.lock_count} 个，"
-        f"蓝色跳过 {preview.blue_skipped} 个。"
+        f"蓝色跳过 {preview.blue_skipped} 个，无可用角色 {preview.no_usable_role} 个。\n"
+        "执行时将逐格校验背包是否与快照一致。"
     )
     table = self.marking_preview_table
     table.setRowCount(len(preview.targets))
     action_labels = {"discard": "弃置", "lock": "上锁"}
     for row, target in enumerate(preview.targets):
         table.setItem(row, 0, QTableWidgetItem(str(target.scan_index)))
-        table.setItem(row, 1, QTableWidgetItem(target.quality))
-        table.setItem(row, 2, QTableWidgetItem(f"{target.max_score:.2f}"))
-        table.setItem(row, 3, QTableWidgetItem(action_labels.get(target.action, target.action)))
+        table.setItem(row, 1, QTableWidgetItem(ITEM_LABELS.get(target.item_type, target.item_type)))
+        table.setItem(row, 2, QTableWidgetItem(target.quality))
+        table.setItem(row, 3, QTableWidgetItem(target.max_grade))
+        table.setItem(row, 4, QTableWidgetItem(target.best_role or "-"))
+        table.setItem(row, 5, QTableWidgetItem(action_labels.get(target.action, target.action)))
     table.setVisible(bool(preview.targets))
     self.marking_execute_btn.setEnabled(bool(preview.targets))
 

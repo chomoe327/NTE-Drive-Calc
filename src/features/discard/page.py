@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QDoubleValidator, QIntValidator
+from PySide6.QtGui import QIntValidator
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.domain.grade_scoring import UI_GRADE_OPTIONS
 from src.features.discard.role_multi_selector import RoleMultiSelector
 
 
@@ -35,29 +37,27 @@ def _quality_row(window, quality: str, label: str):
 
     controls = QHBoxLayout()
     controls.setSpacing(10)
-    discard_edit = QLineEdit()
-    discard_edit.setPlaceholderText("弃置阈值")
-    discard_edit.setValidator(QDoubleValidator(0.0, 9999.0, 2))
-    discard_edit.setMaximumWidth(90)
-    lock_edit = QLineEdit()
-    lock_edit.setPlaceholderText("上锁阈值")
-    lock_edit.setValidator(QDoubleValidator(0.0, 9999.0, 2))
-    lock_edit.setMaximumWidth(90)
-    discard_cb = QCheckBox("低于弃置阈值 → 标记弃置")
-    lock_cb = QCheckBox("高于等于上锁阈值 → 标记上锁")
-    controls.addWidget(QLabel("弃置阈值"))
-    controls.addWidget(discard_edit)
+    discard_combo = QComboBox()
+    discard_combo.addItems(list(UI_GRADE_OPTIONS))
+    discard_combo.setMaximumWidth(80)
+    lock_combo = QComboBox()
+    lock_combo.addItems(list(UI_GRADE_OPTIONS))
+    lock_combo.setMaximumWidth(80)
+    discard_cb = QCheckBox("低于弃置等级 → 标记弃置")
+    lock_cb = QCheckBox("高于等于上锁等级 → 标记上锁")
+    controls.addWidget(QLabel("弃置等级"))
+    controls.addWidget(discard_combo)
     controls.addWidget(discard_cb)
     controls.addSpacing(12)
-    controls.addWidget(QLabel("上锁阈值"))
-    controls.addWidget(lock_edit)
+    controls.addWidget(QLabel("上锁等级"))
+    controls.addWidget(lock_combo)
     controls.addWidget(lock_cb)
     controls.addStretch()
     layout.addLayout(controls)
 
     window._marking_rule_widgets[quality] = {
-        "discard_threshold": discard_edit,
-        "lock_threshold": lock_edit,
+        "discard_grade": discard_combo,
+        "lock_grade": lock_combo,
         "discard_below_enabled": discard_cb,
         "lock_above_enabled": lock_cb,
     }
@@ -86,9 +86,9 @@ def build_marking_page(window):
     window.marking_full_scan_frame = QWidget()
     full_scan_layout = QHBoxLayout(window.marking_full_scan_frame)
     full_scan_layout.setContentsMargins(24, 0, 0, 0)
-    full_scan_layout.addWidget(QLabel("库存数量:"))
+    full_scan_layout.addWidget(QLabel("仓库总格数:"))
     window.marking_total_count_edit = QLineEdit()
-    window.marking_total_count_edit.setPlaceholderText("请输入当前库存数量")
+    window.marking_total_count_edit.setPlaceholderText("驱动+卡带合计格数")
     window.marking_total_count_edit.setValidator(QIntValidator(1, 2000, window.marking_total_count_edit))
     window.marking_total_count_edit.setMaximumWidth(180)
     full_scan_layout.addWidget(window.marking_total_count_edit)
@@ -158,8 +158,10 @@ def build_marking_page(window):
     window.marking_preview_summary.setWordWrap(True)
     rule_card.layout().addWidget(window.marking_preview_summary)
 
-    window.marking_preview_table = QTableWidget(0, 4)
-    window.marking_preview_table.setHorizontalHeaderLabels(["格子", "品质", "最高分", "动作"])
+    window.marking_preview_table = QTableWidget(0, 6)
+    window.marking_preview_table.setHorizontalHeaderLabels(
+        ["格子", "类型", "品质", "最高等级", "最佳角色", "动作"]
+    )
     window.marking_preview_table.horizontalHeader().setStretchLastSection(True)
     window.marking_preview_table.setEditTriggers(QTableWidget.NoEditTriggers)
     window.marking_preview_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -179,9 +181,9 @@ def build_marking_page(window):
     _on_source_changed()
 
     for widgets in window._marking_rule_widgets.values():
-        for widget in widgets.values():
-            if hasattr(widget, "textChanged"):
-                widget.textChanged.connect(window._marking_on_rules_changed)
+        for key, widget in widgets.items():
+            if key in ("discard_grade", "lock_grade"):
+                widget.currentIndexChanged.connect(window._marking_on_rules_changed)
             elif hasattr(widget, "toggled"):
                 widget.toggled.connect(window._marking_on_rules_changed)
 

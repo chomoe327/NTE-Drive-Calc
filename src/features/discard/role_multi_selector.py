@@ -40,6 +40,10 @@ class RoleMultiSelector(QWidget):
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._render_grid)
         search_row.addWidget(self.search, 1)
+        select_all_btn = QPushButton("全选")
+        select_all_btn.setObjectName("btnAction")
+        select_all_btn.clicked.connect(self.select_all)
+        search_row.addWidget(select_all_btn)
         reset_btn = QPushButton("清空选择")
         reset_btn.setObjectName("btnDanger")
         reset_btn.clicked.connect(self.clear_selection)
@@ -119,6 +123,17 @@ class RoleMultiSelector(QWidget):
 
     def clear_selection(self):
         self.selected = []
+        self._render_grid()
+        self.selectionChanged.emit()
+
+    def select_all(self):
+        query = self.search.text().strip() if hasattr(self, "search") else ""
+        names = sorted(self.all_roles.keys())
+        if query:
+            names = [name for name in names if match_pinyin(name, query)]
+        for name in names:
+            if name not in self.selected:
+                self.selected.append(name)
         self._render_grid()
         self.selectionChanged.emit()
 
