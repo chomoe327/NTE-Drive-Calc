@@ -33,6 +33,8 @@ __all__ = [
     "_marking_invalidate_preview",
     "_marking_on_rules_changed",
     "_marking_get_rules_from_ui",
+    "_marking_get_options_from_ui",
+    "_marking_save_config",
     "_marking_set_rules_to_ui",
     "_marking_load_inventory",
     "_marking_start_full_scan",
