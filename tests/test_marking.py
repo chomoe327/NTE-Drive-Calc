@@ -473,32 +473,12 @@ class MarkStateDetectorTest(unittest.TestCase):
     def _template_dir(self) -> Path:
         return Path(__file__).resolve().parents[1] / "config" / "templates" / "marking"
 
-    def _roi_canvas(self, template: np.ndarray, bg: int = 40) -> np.ndarray:
-        canvas = np.full((90, 90), bg, dtype=np.uint8)
+    def _roi_canvas(self, template: np.ndarray, bg: int = 40, size: int = 150) -> np.ndarray:
+        canvas = np.full((size, size), bg, dtype=np.uint8)
         th, tw = template.shape[:2]
-        y0, x0 = (90 - th) // 2, (90 - tw) // 2
+        y0, x0 = (size - th) // 2, (size - tw) // 2
         canvas[y0 : y0 + th, x0 : x0 + tw] = template
         return canvas
-
-    def test_scale_templates_follows_content_scale_factor(self):
-        from src.features.discard.mark_state import MarkStateDetector
-
-        template_dir = self._template_dir()
-        if not (template_dir / "discard_marked.png").exists():
-            self.skipTest("标记模板不存在")
-        detector = MarkStateDetector(template_dir)
-        marked = detector._templates["discard_marked"]
-        unmarked = detector._templates["discard_unmarked"]
-        scale_factor = 1080 / 1440
-        scaled_marked, scaled_unmarked = detector._scale_templates(marked, unmarked, scale_factor)
-        self.assertEqual(
-            scaled_marked.shape,
-            (
-                max(1, int(marked.shape[0] * scale_factor)),
-                max(1, int(marked.shape[1] * scale_factor)),
-            ),
-        )
-        self.assertEqual(scaled_marked.shape, scaled_unmarked.shape)
 
     def test_detect_prefers_marked_template(self):
         from src.features.discard.mark_state import MarkStateDetector
@@ -508,19 +488,16 @@ class MarkStateDetectorTest(unittest.TestCase):
             self.skipTest("标记模板不存在")
         detector = MarkStateDetector(template_dir)
         marked = detector._templates.get("discard_marked")
-        unmarked = detector._templates.get("discard_unmarked")
         self.assertIsNotNone(marked)
-        self.assertIsNotNone(unmarked)
         canvas = self._roi_canvas(marked)
         is_marked, marked_score, unmarked_score, brightness, mid, locate = detector._pair_state(
             canvas,
-            "discard_marked",
-            "discard_unmarked",
+            "discard",
         )
-        self.assertTrue(is_marked)
-        self.assertGreater(marked_score, unmarked_score)
-        self.assertGreaterEqual(brightness, mid)
-        self.assertGreaterEqual(locate, 0.1)
+        self.assertTrue(is_marked, f"bright={brightness:.1f} mid={mid:.1f} loc={locate:.3f}")
+        self.assertGreaterEqual(locate, 0.30)
+        self.assertGreater(brightness, mid)
+        self.assertGreaterEqual(marked_score, unmarked_score)
 
     def test_detect_prefers_unmarked_template(self):
         from src.features.discard.mark_state import MarkStateDetector
@@ -532,13 +509,13 @@ class MarkStateDetectorTest(unittest.TestCase):
         unmarked = detector._templates.get("discard_unmarked")
         self.assertIsNotNone(unmarked)
         canvas = self._roi_canvas(unmarked)
-        is_marked, _, _, brightness, mid, _ = detector._pair_state(
+        is_marked, _, _, brightness, mid, locate = detector._pair_state(
             canvas,
-            "discard_marked",
-            "discard_unmarked",
+            "discard",
         )
-        self.assertFalse(is_marked)
+        self.assertFalse(is_marked, f"bright={brightness:.1f} mid={mid:.1f} loc={locate:.3f}")
         self.assertLess(brightness, mid)
+        self.assertGreaterEqual(locate, 0.30)
 
     def test_detect_low_margin_discarded_state(self):
         from src.features.discard.mark_state import MarkStateDetector
@@ -555,41 +532,13 @@ class MarkStateDetectorTest(unittest.TestCase):
             unmarked = cv2.resize(unmarked, (marked.shape[1], marked.shape[0]))
         blended = cv2.addWeighted(marked, 0.55, unmarked, 0.45, 0)
         canvas = self._roi_canvas(blended)
-        is_marked, marked_score, unmarked_score, brightness, mid, _ = detector._pair_state(
+        is_marked, marked_score, unmarked_score, brightness, mid, locate = detector._pair_state(
             canvas,
-            "discard_marked",
-            "discard_unmarked",
+            "discard",
         )
-        self.assertTrue(is_marked, f"bright={brightness:.1f} mid={mid:.1f} tm={marked_score:.3f}/{unmarked_score:.3f}")
-
-    def test_resolve_marked_state_matches_live_discarded_log(self):
-        from src.features.discard.mark_state import MarkStateDetector
-
-        template_dir = self._template_dir()
-        if not (template_dir / "discard_marked.png").exists():
-            self.skipTest("标记模板不存在")
-        detector = MarkStateDetector(template_dir)
-        cal = detector._calibrations.get("discard")
-        self.assertIsNotNone(cal)
-        # 实机第 164/170 格：亮起但亮度远低于模板校准中点，模板分差小。
         self.assertTrue(
-            detector._resolve_marked_state(0.171, 0.149, 63.3, cal, locate_ok=True),
-            "低分 + 小分差应判为已弃置",
-        )
-
-    def test_resolve_marked_state_matches_live_unmarked_log(self):
-        from src.features.discard.mark_state import MarkStateDetector
-
-        template_dir = self._template_dir()
-        if not (template_dir / "discard_marked.png").exists():
-            self.skipTest("标记模板不存在")
-        detector = MarkStateDetector(template_dir)
-        cal = detector._calibrations.get("discard")
-        self.assertIsNotNone(cal)
-        # 实机第 135 格：未弃置，模板分差大。
-        self.assertFalse(
-            detector._resolve_marked_state(0.182, 0.124, 65.1, cal, locate_ok=True),
-            "低分 + 大分差应判为未弃置",
+            is_marked,
+            f"bright={brightness:.1f} mid={mid:.1f} loc={locate:.3f} tm={marked_score:.3f}/{unmarked_score:.3f}",
         )
 
     def test_detect_prefers_lock_marked_template(self):
@@ -602,14 +551,14 @@ class MarkStateDetectorTest(unittest.TestCase):
         marked = detector._templates.get("lock_marked")
         self.assertIsNotNone(marked)
         canvas = self._roi_canvas(marked)
-        is_marked, marked_score, unmarked_score, brightness, mid, _ = detector._pair_state(
+        is_marked, marked_score, unmarked_score, brightness, mid, locate = detector._pair_state(
             canvas,
-            "lock_marked",
-            "lock_unmarked",
+            "lock",
         )
-        self.assertTrue(is_marked)
-        self.assertGreater(marked_score, unmarked_score)
-        self.assertGreaterEqual(brightness, mid)
+        self.assertTrue(is_marked, f"bright={brightness:.1f} mid={mid:.1f} loc={locate:.3f}")
+        self.assertGreater(brightness, mid)
+        self.assertGreaterEqual(locate, 0.30)
+        self.assertGreaterEqual(marked_score, unmarked_score)
 
     def test_detect_prefers_lock_unmarked_template(self):
         from src.features.discard.mark_state import MarkStateDetector
@@ -621,13 +570,51 @@ class MarkStateDetectorTest(unittest.TestCase):
         unmarked = detector._templates.get("lock_unmarked")
         self.assertIsNotNone(unmarked)
         canvas = self._roi_canvas(unmarked)
-        is_marked, _, _, brightness, mid, _ = detector._pair_state(
+        is_marked, _, _, brightness, mid, locate = detector._pair_state(
             canvas,
-            "lock_marked",
-            "lock_unmarked",
+            "lock",
         )
-        self.assertFalse(is_marked)
+        self.assertFalse(is_marked, f"bright={brightness:.1f} mid={mid:.1f} loc={locate:.3f}")
         self.assertLess(brightness, mid)
+        self.assertGreaterEqual(locate, 0.30)
+
+    def test_raw_drive_screenshots_when_available(self):
+        import cv2
+
+        from src.features.discard.mark_state import MarkStateDetector
+
+        template_dir = self._template_dir()
+        if not (template_dir / "discard_marked.png").exists():
+            self.skipTest("标记模板不存在")
+
+        downloads = Path.home() / "Downloads"
+        cases = [
+            ("raw_drive_0001.png", False, True),
+            ("raw_drive_0002.png", False, False),
+            ("raw_drive_0073.png", True, False),
+        ]
+        if not all((downloads / name).exists() for name, _, _ in cases):
+            self.skipTest("实机截图样本不存在")
+
+        detector = MarkStateDetector(template_dir)
+        for name, expect_discard, expect_lock in cases:
+            image_bgr = cv2.imread(str(downloads / name))
+            self.assertIsNotNone(image_bgr, name)
+            states = detector.detect_from_bgr(image_bgr)
+            self.assertEqual(
+                bool(states["discard"]),
+                expect_discard,
+                f"{name} discard edge={states['discard_locate_score']:.3f} "
+                f"bright%={states['discard_brightness']:.1f}",
+            )
+            self.assertEqual(
+                bool(states["lock"]),
+                expect_lock,
+                f"{name} lock edge={states['lock_locate_score']:.3f} "
+                f"bright%={states['lock_brightness']:.1f}",
+            )
+            self.assertGreaterEqual(states["discard_locate_score"], 0.30, name)
+            self.assertGreaterEqual(states["lock_locate_score"], 0.30, name)
 
 
 class MarkingExecutorButtonTest(unittest.TestCase):

@@ -1,5 +1,5 @@
-# 详情面板弃置/上锁状态：先模板定位，再图标亮度判态。
-"""Locate discard/lock icons via template matching, then judge state by icon brightness."""
+# 详情面板弃置/上锁状态：Canny 边缘定位 + 图标亮像素占比判态。
+"""Locate discard/lock icons via edge matching, then judge state by bright-pixel ratio."""
 
 from __future__ import annotations
 
@@ -14,42 +14,37 @@ from src.scanner.window_capture import crop_window_border_from_image, fit_conten
 from src.utils.image_io import imread_unicode
 from src.utils.logger import logger
 
-# 中心不变，向四周外扩，给 matchTemplate 留出定位余量。
-BASE_DISCARD_ROI = (2025, 300, 2175, 450)
-BASE_LOCK_ROI = (2235, 300, 2385, 450)
-DEFAULT_THRESHOLD = 0.72
-RELATIVE_MARGIN = 0.02
-RELATIVE_RATIO = 0.10
-LOCATE_MIN_SCORE = 0.10
-BRIGHTNESS_HYSTERESIS = 3.0
-# 实机截图中模板分普遍偏低（~0.15–0.20）；亮起时两模板分差小，变暗时 marked 模板明显更高。
-LOW_SCORE_MARKED_CEILING = 0.35
-CLOSE_RELATIVE_MARGIN = 0.25
-OPEN_ABSOLUTE_MARGIN = 0.045
+# 1920x1080 实机标定（2560x1440 基准），向四周外扩供边缘定位搜索。
+BASE_DISCARD_ROI = (2214, 245, 2364, 394)
+BASE_LOCK_ROI = (2304, 238, 2453, 388)
+
+LOCATE_MIN_SCORE_EDGE = 0.30
+BRIGHT_PIXEL_PERCENT_THRESHOLD = 0.50
+BRIGHT_PIXEL_VALUE = 100
+MASK_THRESHOLD = 150
+CANNY_LOW = 50
+CANNY_HIGH = 150
+SCALE_PYRAMID_SPREAD = 0.12
+SCALE_PYRAMID_STEP = 0.02
 
 
 @dataclass
-class _PairCalibration:
-    icon_mask: np.ndarray
-    template_shape: tuple[int, int]
-    marked_brightness: float
-    unmarked_brightness: float
-
-    @property
-    def brightness_mid(self) -> float:
-        return (self.marked_brightness + self.unmarked_brightness) / 2.0
+class _MarkCalibration:
+    edge_locator: np.ndarray
+    icon_binary_mask: np.ndarray
+    base_shape: tuple[int, int]
 
 
 class MarkStateDetector:
     def __init__(
         self,
         template_dir: Path,
-        confidence_threshold: float = DEFAULT_THRESHOLD,
+        confidence_threshold: float = 0.72,
     ):
         self.template_dir = Path(template_dir)
         self.confidence_threshold = confidence_threshold
         self._templates: dict[str, np.ndarray] = {}
-        self._calibrations: dict[str, _PairCalibration] = {}
+        self._calibrations: dict[str, _MarkCalibration] = {}
         self._load_templates()
         self._calibrate_pairs()
 
@@ -68,76 +63,53 @@ class MarkStateDetector:
             else:
                 logger.warning(f"标记状态模板缺失: {path}")
 
-    def _calibrate_pairs(self) -> None:
-        for prefix in ("discard", "lock"):
-            marked = self._templates.get(f"{prefix}_marked")
-            unmarked = self._templates.get(f"{prefix}_unmarked")
-            if marked is None or unmarked is None:
+    def _make_binary_mask(self, template: np.ndarray, thresh_val: int = MASK_THRESHOLD) -> np.ndarray:
+        _, binary = cv2.threshold(template, thresh_val, 255, cv2.THRESH_BINARY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        mask = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+        return mask > 0
+
+    def _combine_edge_locator(self, *templates: np.ndarray | None) -> np.ndarray | None:
+        edges = []
+        for template in templates:
+            if template is None:
                 continue
-            if unmarked.shape != marked.shape:
-                unmarked = cv2.resize(
-                    unmarked,
-                    (marked.shape[1], marked.shape[0]),
-                    interpolation=cv2.INTER_AREA,
+            edges.append(cv2.Canny(template, CANNY_LOW, CANNY_HIGH))
+        if not edges:
+            return None
+        combined = edges[0]
+        for edge in edges[1:]:
+            if edge.shape != combined.shape:
+                edge = cv2.resize(
+                    edge,
+                    (combined.shape[1], combined.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
                 )
-            icon_mask = self._build_icon_mask(marked)
-            self._calibrations[prefix] = _PairCalibration(
-                icon_mask=icon_mask,
-                template_shape=marked.shape[:2],
-                marked_brightness=self._icon_brightness(marked, icon_mask),
-                unmarked_brightness=self._icon_brightness(unmarked, icon_mask),
+            combined = cv2.max(combined, edge)
+        return combined
+
+    def _calibrate_pairs(self) -> None:
+        discard_marked = self._templates.get("discard_marked")
+        discard_unmarked = self._templates.get("discard_unmarked")
+        if discard_marked is not None and discard_unmarked is not None:
+            edge_loc = self._combine_edge_locator(discard_marked, discard_unmarked)
+            assert edge_loc is not None
+            self._calibrations["discard"] = _MarkCalibration(
+                edge_locator=edge_loc,
+                icon_binary_mask=self._make_binary_mask(discard_marked),
+                base_shape=discard_unmarked.shape[:2],
             )
 
-    def _build_icon_mask(self, template: np.ndarray) -> np.ndarray:
-        h, w = template.shape[:2]
-        cy, cx = h / 2.0, w / 2.0
-        y, x = np.ogrid[:h, :w]
-        dist = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
-        max_r = float(min(cx, cy, w - 1 - cx, h - 1 - cy))
-        return dist <= max_r * 0.42
-
-    def _icon_mask_for_patch(self, cal: _PairCalibration, height: int, width: int) -> np.ndarray:
-        th, tw = cal.template_shape
-        if (height, width) == (th, tw):
-            return cal.icon_mask
-        return cv2.resize(cal.icon_mask.astype(np.uint8), (width, height), interpolation=cv2.INTER_NEAREST) > 0
-
-    def _icon_brightness(self, patch: np.ndarray, icon_mask: np.ndarray) -> float:
-        if patch.size == 0:
-            return 0.0
-        mask = icon_mask
-        if mask.shape[:2] != patch.shape[:2]:
-            mask = cv2.resize(
-                icon_mask.astype(np.uint8),
-                (patch.shape[1], patch.shape[0]),
-                interpolation=cv2.INTER_NEAREST,
-            ) > 0
-        if not np.any(mask):
-            return float(np.mean(patch))
-        return float(np.mean(patch[mask]))
-
-    def _locate_patch(
-        self,
-        region_gray: np.ndarray,
-        template: np.ndarray,
-    ) -> tuple[np.ndarray, float]:
-        if region_gray.size == 0 or template.size == 0:
-            return region_gray, 0.0
-        th, tw = template.shape[:2]
-        rh, rw = region_gray.shape[:2]
-        search_template = template
-        if rh < th or rw < tw:
-            search_template = cv2.resize(template, (rw, rh), interpolation=cv2.INTER_AREA)
-            th, tw = rh, rw
-        res = cv2.matchTemplate(region_gray, search_template, cv2.TM_CCOEFF_NORMED)
-        if res.size == 0:
-            return region_gray, 0.0
-        locate_score = float(res.max())
-        _, _, _, (x, y) = cv2.minMaxLoc(res)
-        patch = region_gray[y : y + th, x : x + tw]
-        if patch.shape[:2] != (th, tw):
-            patch = cv2.resize(patch, (tw, th), interpolation=cv2.INTER_AREA)
-        return patch, locate_score
+        lock_marked = self._templates.get("lock_marked")
+        lock_unmarked = self._templates.get("lock_unmarked")
+        if lock_marked is not None and lock_unmarked is not None:
+            edge_loc = self._combine_edge_locator(lock_marked, lock_unmarked)
+            assert edge_loc is not None
+            self._calibrations["lock"] = _MarkCalibration(
+                edge_locator=edge_loc,
+                icon_binary_mask=self._make_binary_mask(lock_marked),
+                base_shape=lock_unmarked.shape[:2],
+            )
 
     def _content_scale_factor(self, width: int, height: int) -> float:
         content_rect = fit_content_rect(
@@ -163,165 +135,133 @@ class MarkStateDetector:
             content_rect=content_rect,
         )
 
-    def _scale_templates(
-        self,
-        marked: np.ndarray,
-        unmarked: np.ndarray,
-        scale_factor: float,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def _scale_pyramid(self, scale_factor: float) -> list[float]:
         if abs(scale_factor - 1.0) <= 0.01:
-            return marked, unmarked
-        new_w = max(1, int(marked.shape[1] * scale_factor))
-        new_h = max(1, int(marked.shape[0] * scale_factor))
-        marked_scaled = cv2.resize(marked, (new_w, new_h), interpolation=cv2.INTER_AREA)
-        if unmarked.shape != marked.shape:
-            unmarked = cv2.resize(
-                unmarked,
-                (marked.shape[1], marked.shape[0]),
-                interpolation=cv2.INTER_AREA,
-            )
-        unmarked_scaled = cv2.resize(unmarked, (new_w, new_h), interpolation=cv2.INTER_AREA)
-        return marked_scaled, unmarked_scaled
+            center = 1.0
+        else:
+            center = max(0.1, scale_factor)
+        spread = SCALE_PYRAMID_SPREAD
+        step = SCALE_PYRAMID_STEP
+        scales: set[float] = set()
+        value = center - spread
+        while value <= center + spread + step * 0.5:
+            scales.add(round(max(0.1, value), 4))
+            value += step
+        return sorted(scales)
 
-    def _best_score(self, region_gray: np.ndarray, template: np.ndarray) -> float:
+    def _locate_patch_multiscale(
+        self,
+        region_gray: np.ndarray,
+        edge_template: np.ndarray,
+        scale_factor: float,
+    ) -> tuple[np.ndarray | None, float]:
+        if region_gray.size == 0 or edge_template.size == 0:
+            return None, 0.0
+
+        region_edge = cv2.Canny(region_gray, CANNY_LOW, CANNY_HIGH)
+        base_h, base_w = edge_template.shape[:2]
+
+        best_score = 0.0
+        best_loc = (0, 0)
+        best_patch_shape = (base_h, base_w)
+
+        for scale in self._scale_pyramid(scale_factor):
+            new_w = max(1, int(round(base_w * scale)))
+            new_h = max(1, int(round(base_h * scale)))
+            if new_h > region_edge.shape[0] or new_w > region_edge.shape[1]:
+                continue
+            scaled_template = cv2.resize(edge_template, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            res = cv2.matchTemplate(region_edge, scaled_template, cv2.TM_CCOEFF_NORMED)
+            if res.size == 0:
+                continue
+            loc_score = float(res.max())
+            if loc_score > best_score:
+                best_score = loc_score
+                best_patch_shape = (new_h, new_w)
+                _, _, _, best_loc = cv2.minMaxLoc(res)
+
+        if best_score < LOCATE_MIN_SCORE_EDGE:
+            return None, best_score
+
+        h, w = best_patch_shape
+        x, y = best_loc
+        patch = region_gray[y : y + h, x : x + w]
+        if patch.size == 0:
+            return None, best_score
+        return patch, best_score
+
+    def _bright_pixel_percent(self, patch: np.ndarray, icon_binary_mask: np.ndarray) -> float:
+        if patch.size == 0:
+            return 0.0
+        mask = cv2.resize(
+            icon_binary_mask.astype(np.uint8),
+            (patch.shape[1], patch.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        ) > 0
+        if not np.any(mask):
+            return 0.0
+        pixels = patch[mask]
+        return float(np.mean(pixels > BRIGHT_PIXEL_VALUE))
+
+    def _patch_template_scores(
+        self,
+        patch: np.ndarray,
+        pair_prefix: str,
+        scale_factor: float,
+    ) -> tuple[float, float]:
+        marked = self._templates.get(f"{pair_prefix}_marked")
+        unmarked = self._templates.get(f"{pair_prefix}_unmarked")
+        if patch is None or patch.size == 0 or marked is None or unmarked is None:
+            return 0.0, 0.0
+        if abs(scale_factor - 1.0) > 0.01:
+            new_w = max(1, int(round(marked.shape[1] * scale_factor)))
+            new_h = max(1, int(round(marked.shape[0] * scale_factor)))
+            marked = cv2.resize(marked, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            if unmarked.shape != marked.shape:
+                unmarked = cv2.resize(unmarked, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        return self._match_score(patch, marked), self._match_score(patch, unmarked)
+
+    def _match_score(self, region_gray: np.ndarray, template: np.ndarray) -> float:
         if region_gray.size == 0 or template.size == 0:
             return 0.0
         th, tw = template.shape[:2]
         rh, rw = region_gray.shape[:2]
-        if rh < th or rw < tw:
-            scaled = cv2.resize(template, (rw, rh), interpolation=cv2.INTER_AREA)
-            res = cv2.matchTemplate(region_gray, scaled, cv2.TM_CCOEFF_NORMED)
-        else:
-            res = cv2.matchTemplate(region_gray, template, cv2.TM_CCOEFF_NORMED)
+        if th > rh or tw > rw:
+            scale = min(rw / tw, rh / th)
+            new_w = max(1, int(round(tw * scale)))
+            new_h = max(1, int(round(th * scale)))
+            template = cv2.resize(template, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        if template.shape[0] > region_gray.shape[0] or template.shape[1] > region_gray.shape[1]:
+            return 0.0
+        res = cv2.matchTemplate(region_gray, template, cv2.TM_CCOEFF_NORMED)
         return float(res.max()) if res.size else 0.0
 
-    def _patch_pair_scores(
-        self,
-        patch: np.ndarray,
-        marked: np.ndarray,
-        unmarked: np.ndarray,
-    ) -> tuple[float, float]:
-        if patch.size == 0:
-            return 0.0, 0.0
-        if unmarked.shape != marked.shape:
-            unmarked = cv2.resize(
-                unmarked,
-                (marked.shape[1], marked.shape[0]),
-                interpolation=cv2.INTER_AREA,
-            )
-        return self._best_score(patch, marked), self._best_score(patch, unmarked)
-
-    def _template_says_marked(self, marked_score: float, unmarked_score: float) -> bool:
-        margin = marked_score - unmarked_score
-        return marked_score > unmarked_score and (
-            marked_score >= self.confidence_threshold
-            or margin >= RELATIVE_MARGIN
-            or margin >= unmarked_score * RELATIVE_RATIO
-        )
-
-    def _template_says_unmarked(self, marked_score: float, unmarked_score: float) -> bool:
-        margin = unmarked_score - marked_score
-        return unmarked_score > marked_score and (
-            unmarked_score >= self.confidence_threshold
-            or margin >= RELATIVE_MARGIN
-            or margin >= marked_score * RELATIVE_RATIO
-        )
-
-    def _brightness_says_marked(self, brightness: float, cal: _PairCalibration) -> bool | None:
-        mid = cal.brightness_mid
-        if brightness >= mid + BRIGHTNESS_HYSTERESIS:
-            return True
-        if brightness <= mid - BRIGHTNESS_HYSTERESIS:
-            return False
-        return None
-
-    def _brightness_trustworthy(self, brightness: float, cal: _PairCalibration) -> bool:
-        """实机 ROI 亮度常低于模板校准值，此时不应让亮度一票否决。"""
-        floor = min(cal.marked_brightness, cal.unmarked_brightness) - BRIGHTNESS_HYSTERESIS
-        ceiling = max(cal.marked_brightness, cal.unmarked_brightness) + BRIGHTNESS_HYSTERESIS
-        return floor <= brightness <= ceiling
-
-    def _resolve_marked_state(
-        self,
-        marked_score: float,
-        unmarked_score: float,
-        brightness: float,
-        cal: _PairCalibration | None,
-        *,
-        locate_ok: bool,
-    ) -> bool:
-        margin = marked_score - unmarked_score
-        rel_margin = margin / max(marked_score, 1e-6)
-
-        if marked_score >= self.confidence_threshold and margin > 0:
-            return True
-        if unmarked_score >= self.confidence_threshold and margin < 0:
-            return False
-
-        if locate_ok:
-            if (
-                marked_score <= LOW_SCORE_MARKED_CEILING
-                and margin > 0
-                and rel_margin < CLOSE_RELATIVE_MARGIN
-            ):
-                return True
-            if margin >= OPEN_ABSOLUTE_MARGIN:
-                return False
-
-        if cal is not None and self._brightness_trustworthy(brightness, cal):
-            brightness_state = self._brightness_says_marked(brightness, cal)
-            if brightness_state is not None:
-                return brightness_state
-
-        if self._template_says_marked(marked_score, unmarked_score):
-            return True
-        if self._template_says_unmarked(marked_score, unmarked_score):
-            return False
-        if cal is not None:
-            return brightness >= cal.brightness_mid
-        return marked_score >= unmarked_score
+    def _is_patch_marked(self, patch: np.ndarray, cal: _MarkCalibration) -> tuple[bool, float]:
+        bright_percent = self._bright_pixel_percent(patch, cal.icon_binary_mask)
+        return bright_percent > BRIGHT_PIXEL_PERCENT_THRESHOLD, bright_percent
 
     def _pair_state(
         self,
         region_gray: np.ndarray,
-        marked_key: str,
-        unmarked_key: str,
+        pair_prefix: str,
         scale_factor: float = 1.0,
     ) -> tuple[bool, float, float, float, float, float]:
-        marked = self._templates.get(marked_key)
-        unmarked = self._templates.get(unmarked_key)
-        if marked is None or unmarked is None:
+        cal = self._calibrations.get(pair_prefix)
+        if cal is None:
             return False, 0.0, 0.0, 0.0, 0.0, 0.0
 
-        marked, unmarked = self._scale_templates(marked, unmarked, scale_factor)
-
-        region_marked_score = self._best_score(region_gray, marked)
-        region_unmarked_score = self._best_score(region_gray, unmarked)
-        marked_score = region_marked_score
-        unmarked_score = region_unmarked_score
-
-        prefix = marked_key[: -len("_marked")]
-        cal = self._calibrations.get(prefix)
-        locate_score = 0.0
-        brightness = 0.0
-        brightness_mid = cal.brightness_mid if cal is not None else 0.0
-        locate_ok = False
-
-        if cal is not None:
-            patch, locate_score = self._locate_patch(region_gray, marked)
-            icon_mask = self._icon_mask_for_patch(cal, patch.shape[0], patch.shape[1])
-            brightness = self._icon_brightness(patch, icon_mask)
-            if locate_score >= LOCATE_MIN_SCORE:
-                locate_ok = True
-                marked_score, unmarked_score = self._patch_pair_scores(patch, marked, unmarked)
-
-        is_marked = self._resolve_marked_state(
-            marked_score,
-            unmarked_score,
-            brightness,
-            cal,
-            locate_ok=locate_ok,
+        patch, locate_score = self._locate_patch_multiscale(
+            region_gray,
+            cal.edge_locator,
+            scale_factor,
         )
+        if patch is None:
+            return False, 0.0, 0.0, 0.0, BRIGHT_PIXEL_PERCENT_THRESHOLD * 100.0, locate_score
+
+        is_marked, bright_percent = self._is_patch_marked(patch, cal)
+        marked_score, unmarked_score = self._patch_template_scores(patch, pair_prefix, scale_factor)
+        brightness = bright_percent * 100.0
+        brightness_mid = BRIGHT_PIXEL_PERCENT_THRESHOLD * 100.0
 
         return (
             is_marked,
@@ -350,12 +290,7 @@ class MarkStateDetector:
             discard_brightness,
             discard_brightness_mid,
             discard_locate_score,
-        ) = self._pair_state(
-            discard_region,
-            "discard_marked",
-            "discard_unmarked",
-            scale_factor,
-        )
+        ) = self._pair_state(discard_region, "discard", scale_factor)
         (
             lock_marked,
             lock_marked_score,
@@ -363,12 +298,7 @@ class MarkStateDetector:
             lock_brightness,
             lock_brightness_mid,
             lock_locate_score,
-        ) = self._pair_state(
-            lock_region,
-            "lock_marked",
-            "lock_unmarked",
-            scale_factor,
-        )
+        ) = self._pair_state(lock_region, "lock", scale_factor)
         return {
             "discard": discard_marked,
             "lock": lock_marked,
@@ -382,7 +312,6 @@ class MarkStateDetector:
             "lock_brightness": lock_brightness,
             "lock_brightness_mid": lock_brightness_mid,
             "lock_locate_score": lock_locate_score,
-            # 兼容旧日志字段名
             "discard_contrast": discard_brightness,
             "discard_contrast_mid": discard_brightness_mid,
             "lock_contrast": lock_brightness,
