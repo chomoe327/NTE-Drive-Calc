@@ -480,6 +480,26 @@ class MarkStateDetectorTest(unittest.TestCase):
         canvas[y0 : y0 + th, x0 : x0 + tw] = template
         return canvas
 
+    def test_scale_templates_follows_content_scale_factor(self):
+        from src.features.discard.mark_state import MarkStateDetector
+
+        template_dir = self._template_dir()
+        if not (template_dir / "discard_marked.png").exists():
+            self.skipTest("标记模板不存在")
+        detector = MarkStateDetector(template_dir)
+        marked = detector._templates["discard_marked"]
+        unmarked = detector._templates["discard_unmarked"]
+        scale_factor = 1080 / 1440
+        scaled_marked, scaled_unmarked = detector._scale_templates(marked, unmarked, scale_factor)
+        self.assertEqual(
+            scaled_marked.shape,
+            (
+                max(1, int(marked.shape[0] * scale_factor)),
+                max(1, int(marked.shape[1] * scale_factor)),
+            ),
+        )
+        self.assertEqual(scaled_marked.shape, scaled_unmarked.shape)
+
     def test_detect_prefers_marked_template(self):
         from src.features.discard.mark_state import MarkStateDetector
 
@@ -541,6 +561,36 @@ class MarkStateDetectorTest(unittest.TestCase):
             "discard_unmarked",
         )
         self.assertTrue(is_marked, f"bright={brightness:.1f} mid={mid:.1f} tm={marked_score:.3f}/{unmarked_score:.3f}")
+
+    def test_resolve_marked_state_matches_live_discarded_log(self):
+        from src.features.discard.mark_state import MarkStateDetector
+
+        template_dir = self._template_dir()
+        if not (template_dir / "discard_marked.png").exists():
+            self.skipTest("标记模板不存在")
+        detector = MarkStateDetector(template_dir)
+        cal = detector._calibrations.get("discard")
+        self.assertIsNotNone(cal)
+        # 实机第 164/170 格：亮起但亮度远低于模板校准中点，模板分差小。
+        self.assertTrue(
+            detector._resolve_marked_state(0.171, 0.149, 63.3, cal, locate_ok=True),
+            "低分 + 小分差应判为已弃置",
+        )
+
+    def test_resolve_marked_state_matches_live_unmarked_log(self):
+        from src.features.discard.mark_state import MarkStateDetector
+
+        template_dir = self._template_dir()
+        if not (template_dir / "discard_marked.png").exists():
+            self.skipTest("标记模板不存在")
+        detector = MarkStateDetector(template_dir)
+        cal = detector._calibrations.get("discard")
+        self.assertIsNotNone(cal)
+        # 实机第 135 格：未弃置，模板分差大。
+        self.assertFalse(
+            detector._resolve_marked_state(0.182, 0.124, 65.1, cal, locate_ok=True),
+            "低分 + 大分差应判为未弃置",
+        )
 
     def test_detect_prefers_lock_marked_template(self):
         from src.features.discard.mark_state import MarkStateDetector
