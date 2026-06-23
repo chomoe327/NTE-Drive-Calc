@@ -24,13 +24,35 @@ class QualityMarkRule:
     lock_above_enabled: bool = False
 
     def validate(self) -> str | None:
-        if self.discard_grade not in GRADE_LADDER or self.lock_grade not in GRADE_LADDER:
-            return "等级必须在 D~ACE 范围内"
-        if grade_rank(self.lock_grade) <= grade_rank(self.discard_grade):
-            return "上锁等级必须高于弃置等级"
         if not self.discard_below_enabled and not self.lock_above_enabled:
-            return "至少开启弃置或上锁其中一项"
+            return None
+        if self.discard_below_enabled and self.discard_grade not in GRADE_LADDER:
+            return "弃置等级必须在 D~ACE 范围内"
+        if self.lock_above_enabled and self.lock_grade not in GRADE_LADDER:
+            return "上锁等级必须在 D~ACE 范围内"
+        if (
+            self.discard_below_enabled
+            and self.lock_above_enabled
+            and grade_rank(self.lock_grade) <= grade_rank(self.discard_grade)
+        ):
+            return "上锁等级必须高于弃置等级"
         return None
+
+
+@dataclass
+class MarkingOptions:
+    ignore_no_usable_role: bool = False
+    ignore_locked: bool = False
+
+
+DEFAULT_OPTIONS = MarkingOptions()
+
+
+def count_enabled_rule_switches(rules: dict[Quality, QualityMarkRule]) -> int:
+    return sum(
+        int(rule.discard_below_enabled) + int(rule.lock_above_enabled)
+        for rule in rules.values()
+    )
 
 
 DEFAULT_RULES: dict[Quality, QualityMarkRule] = {
@@ -52,15 +74,12 @@ def resolve_action(quality: str, max_grade: str, rules: dict[Quality, QualityMar
 
 
 def validate_rules(rules: dict[Quality, QualityMarkRule]) -> str | None:
-    enabled = False
     for rule in rules.values():
         err = rule.validate()
         if err:
             return f"{rule.quality}: {err}"
-        if rule.discard_below_enabled or rule.lock_above_enabled:
-            enabled = True
-    if not enabled:
-        return "至少为一个品质开启弃置或上锁规则"
+    if count_enabled_rule_switches(rules) < 1:
+        return "金/紫四个规则开关中至少开启一项"
     return None
 
 
@@ -72,12 +91,23 @@ def _grade_from_entry(entry: dict, key: str, default: str) -> str:
 
 
 def load_rules(path: Path) -> dict[Quality, QualityMarkRule]:
+    rules, _ = load_marking_config(path)
+    return rules
+
+
+def load_marking_config(path: Path) -> tuple[dict[Quality, QualityMarkRule], MarkingOptions]:
     if not path.exists():
-        return {k: QualityMarkRule(**asdict(v)) for k, v in DEFAULT_RULES.items()}
+        return (
+            {k: QualityMarkRule(**asdict(v)) for k, v in DEFAULT_RULES.items()},
+            MarkingOptions(**asdict(DEFAULT_OPTIONS)),
+        )
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return {k: QualityMarkRule(**asdict(v)) for k, v in DEFAULT_RULES.items()}
+        return (
+            {k: QualityMarkRule(**asdict(v)) for k, v in DEFAULT_RULES.items()},
+            MarkingOptions(**asdict(DEFAULT_OPTIONS)),
+        )
     rules: dict[Quality, QualityMarkRule] = {}
     for quality in ("Gold", "Purple"):
         entry = raw.get(quality, {})
@@ -89,10 +119,25 @@ def load_rules(path: Path) -> dict[Quality, QualityMarkRule]:
             discard_below_enabled=bool(entry.get("discard_below_enabled", default.discard_below_enabled)),
             lock_above_enabled=bool(entry.get("lock_above_enabled", default.lock_above_enabled)),
         )
-    return rules
+    options = MarkingOptions(
+        ignore_no_usable_role=bool(raw.get("ignore_no_usable_role", DEFAULT_OPTIONS.ignore_no_usable_role)),
+        ignore_locked=bool(raw.get("ignore_locked", DEFAULT_OPTIONS.ignore_locked)),
+    )
+    return rules, options
 
 
 def save_rules(path: Path, rules: dict[Quality, QualityMarkRule]) -> None:
+    _, options = load_marking_config(path)
+    save_marking_config(path, rules, options)
+
+
+def save_marking_config(
+    path: Path,
+    rules: dict[Quality, QualityMarkRule],
+    options: MarkingOptions,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {quality: asdict(rule) for quality, rule in rules.items()}
+    payload["ignore_no_usable_role"] = options.ignore_no_usable_role
+    payload["ignore_locked"] = options.ignore_locked
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

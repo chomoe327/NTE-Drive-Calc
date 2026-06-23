@@ -71,11 +71,14 @@ class MarkingExecutor:
         template_dir: Path,
         config_dir: Path,
         macros_path: Path | None = None,
+        *,
+        ignore_locked: bool = False,
     ):
         self.session = session
         self.template_dir = Path(template_dir)
         self.config_dir = Path(config_dir)
         self.macros_path = Path(macros_path) if macros_path else None
+        self.ignore_locked = ignore_locked
         self.detector = MarkStateDetector(self.template_dir)
         self._stopped = False
         self.scanner: GamepadScanner | None = None
@@ -175,10 +178,14 @@ class MarkingExecutor:
     def _detect_mark_states(self, image_bgr: np.ndarray, scan_index: int) -> dict[str, bool | float]:
         states = self.detector.detect_from_bgr(image_bgr)
         logger.info(
-            f"第 {scan_index} 格标记状态 discard="
-            f"{float(states.get('discard_marked_score', 0.0)):.3f}/"
+            f"第 {scan_index} 格标记状态 "
+            f"discard contrast={float(states.get('discard_contrast', 0.0)):.1f}/"
+            f"{float(states.get('discard_contrast_mid', 0.0)):.1f} "
+            f"tm={float(states.get('discard_marked_score', 0.0)):.3f}/"
             f"{float(states.get('discard_unmarked_score', 0.0)):.3f} "
-            f"lock={float(states.get('lock_marked_score', 0.0)):.3f}/"
+            f"lock contrast={float(states.get('lock_contrast', 0.0)):.1f}/"
+            f"{float(states.get('lock_contrast_mid', 0.0)):.1f} "
+            f"tm={float(states.get('lock_marked_score', 0.0)):.3f}/"
             f"{float(states.get('lock_unmarked_score', 0.0)):.3f} "
             f"=> discard={bool(states.get('discard'))} lock={bool(states.get('lock'))}"
         )
@@ -200,6 +207,12 @@ class MarkingExecutor:
         image_bgr = self._verify_entry_with_retry(sct, entry)
         was_locked_before = False
         if target.action == "discard":
+            states = self._detect_mark_states(image_bgr, target.scan_index)
+            if states.get("discard"):
+                return MarkStepResult(target.scan_index, target.action, "skipped_already_marked")
+            if self.ignore_locked and states.get("lock"):
+                logger.info(f"第 {target.scan_index} 格已上锁，忽略弃置")
+                return MarkStepResult(target.scan_index, target.action, "skipped_locked")
             image_bgr, was_locked_before = self._ensure_unlocked_for_discard(sct, image_bgr, target.scan_index)
             states = self._detect_mark_states(image_bgr, target.scan_index)
             if states.get("discard"):

@@ -122,6 +122,14 @@ def build_marking_page(window):
     window.marking_rule_hint.setStyleSheet("color:#f85149;font-size:12px;border:none")
     rule_card.layout().addWidget(window.marking_rule_hint)
 
+    options_row = QHBoxLayout()
+    window.marking_ignore_no_usable_cb = QCheckBox("忽略无可用角色（不标记弃置）")
+    window.marking_ignore_locked_cb = QCheckBox("忽略已上锁（不标记弃置）")
+    options_row.addWidget(window.marking_ignore_no_usable_cb)
+    options_row.addWidget(window.marking_ignore_locked_cb)
+    options_row.addStretch()
+    rule_card.layout().addLayout(options_row)
+
     action_row = QHBoxLayout()
     window.marking_calc_btn = QPushButton("计算")
     window.marking_calc_btn.setObjectName("btnAction")
@@ -177,5 +185,7 @@ def build_marking_page(window):
                 widget.currentIndexChanged.connect(window._marking_on_rules_changed)
             elif hasattr(widget, "toggled"):
                 widget.toggled.connect(window._marking_on_rules_changed)
+    window.marking_ignore_no_usable_cb.toggled.connect(window._marking_on_rules_changed)
+    window.marking_ignore_locked_cb.toggled.connect(window._marking_on_rules_changed)
 
     return scroll

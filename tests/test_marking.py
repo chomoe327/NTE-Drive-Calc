@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
 import numpy as np
+import cv2
 
 from src.domain.grade_scoring import (
     GRADE_LADDER,
@@ -15,6 +16,7 @@ from src.domain.grade_scoring import (
 )
 from src.features.discard.log_store import MarkLogEntry, MarkLogSession, MarkLogStore
 from src.features.discard.quality_rules import (
+    MarkingOptions,
     QualityMarkRule,
     resolve_action,
     validate_rules,
@@ -119,7 +121,9 @@ class GradeScoringTest(unittest.TestCase):
 
 class MarkingQualityRulesTest(unittest.TestCase):
     def test_lock_must_exceed_discard_grade(self):
-        rule = QualityMarkRule("Gold", "SS", "B", discard_below_enabled=True)
+        rule = QualityMarkRule(
+            "Gold", "SS", "B", discard_below_enabled=True, lock_above_enabled=True
+        )
         self.assertIsNotNone(rule.validate())
 
     def test_middle_band_no_action(self):
@@ -141,12 +145,26 @@ class MarkingQualityRulesTest(unittest.TestCase):
         self.assertIsNone(resolve_action("Purple", "A", lock_only))
         self.assertEqual(resolve_action("Purple", "SS", lock_only), "lock")
 
-    def test_validate_requires_enabled_rule(self):
+    def test_validate_requires_at_least_one_switch(self):
         rules = {
             "Gold": QualityMarkRule("Gold"),
             "Purple": QualityMarkRule("Purple"),
         }
         self.assertIsNotNone(validate_rules(rules))
+
+    def test_validate_allows_single_enabled_switch(self):
+        rules = {
+            "Gold": QualityMarkRule("Gold", discard_below_enabled=True),
+            "Purple": QualityMarkRule("Purple"),
+        }
+        self.assertIsNone(validate_rules(rules))
+
+    def test_validate_skips_unused_grade_constraints(self):
+        rules = {
+            "Gold": QualityMarkRule("Gold", "SS", "B", lock_above_enabled=True),
+            "Purple": QualityMarkRule("Purple"),
+        }
+        self.assertIsNone(validate_rules(rules))
 
 
 class MarkingScanSessionTest(unittest.TestCase):
@@ -260,6 +278,27 @@ class MarkingScoringTest(unittest.TestCase):
         self.assertEqual(preview.no_usable_role, 1)
         self.assertEqual(preview.discard_count, 1)
         self.assertEqual(preview.targets[0].max_grade, "D")
+
+    def test_ignore_no_usable_role_skips_discard(self):
+        inventory = [_drive("orphan", 1, "Gold", shape_id="UNKNOWN")]
+        session = build_session_from_inventory(inventory)
+        rules = {"Gold": QualityMarkRule("Gold", "B", "SS", discard_below_enabled=True)}
+        orchestrator, blueprints = self._mock_orchestrator()
+        engine = MagicMock()
+        preview = build_mark_preview(
+            session,
+            ["角色A"],
+            rules,
+            engine,
+            inventory,
+            orchestrator,
+            blueprints,
+            MarkingOptions(ignore_no_usable_role=True),
+        )
+        self.assertEqual(preview.no_usable_role, 1)
+        self.assertEqual(preview.no_usable_role_skipped, 1)
+        self.assertEqual(preview.discard_count, 0)
+        self.assertEqual(preview.targets, [])
 
 
 class RoleMultiSelectorTest(unittest.TestCase):
@@ -431,10 +470,20 @@ class GamepadScannerBatchTest(unittest.TestCase):
 
 
 class MarkStateDetectorTest(unittest.TestCase):
+    def _template_dir(self) -> Path:
+        return Path(__file__).resolve().parents[1] / "config" / "templates" / "marking"
+
+    def _roi_canvas(self, template: np.ndarray, bg: int = 40) -> np.ndarray:
+        canvas = np.full((90, 90), bg, dtype=np.uint8)
+        th, tw = template.shape[:2]
+        y0, x0 = (90 - th) // 2, (90 - tw) // 2
+        canvas[y0 : y0 + th, x0 : x0 + tw] = template
+        return canvas
+
     def test_detect_prefers_marked_template(self):
         from src.features.discard.mark_state import MarkStateDetector
 
-        template_dir = Path(__file__).resolve().parents[1] / "config" / "templates" / "marking"
+        template_dir = self._template_dir()
         if not (template_dir / "discard_marked.png").exists():
             self.skipTest("标记模板不存在")
         detector = MarkStateDetector(template_dir)
@@ -442,36 +491,92 @@ class MarkStateDetectorTest(unittest.TestCase):
         unmarked = detector._templates.get("discard_unmarked")
         self.assertIsNotNone(marked)
         self.assertIsNotNone(unmarked)
-        canvas = np.full((120, 120), 180, dtype=np.uint8)
-        mh, mw = marked.shape[:2]
-        canvas[10 : 10 + mh, 10 : 10 + mw] = marked
-        is_marked, marked_score, unmarked_score = detector._pair_state(
+        canvas = self._roi_canvas(marked)
+        is_marked, marked_score, unmarked_score, contrast, mid = detector._pair_state(
             canvas,
             "discard_marked",
             "discard_unmarked",
         )
         self.assertTrue(is_marked)
         self.assertGreater(marked_score, unmarked_score)
+        self.assertGreaterEqual(contrast, mid)
+
+    def test_detect_prefers_unmarked_template(self):
+        from src.features.discard.mark_state import MarkStateDetector
+
+        template_dir = self._template_dir()
+        if not (template_dir / "discard_unmarked.png").exists():
+            self.skipTest("标记模板不存在")
+        detector = MarkStateDetector(template_dir)
+        unmarked = detector._templates.get("discard_unmarked")
+        self.assertIsNotNone(unmarked)
+        canvas = self._roi_canvas(unmarked)
+        is_marked, _, _, contrast, mid = detector._pair_state(
+            canvas,
+            "discard_marked",
+            "discard_unmarked",
+        )
+        self.assertFalse(is_marked)
+        self.assertLess(contrast, mid)
+
+    def test_detect_low_margin_discarded_state(self):
+        from src.features.discard.mark_state import MarkStateDetector
+
+        template_dir = self._template_dir()
+        if not (template_dir / "discard_marked.png").exists():
+            self.skipTest("标记模板不存在")
+        detector = MarkStateDetector(template_dir)
+        marked = detector._templates.get("discard_marked")
+        unmarked = detector._templates.get("discard_unmarked")
+        self.assertIsNotNone(marked)
+        self.assertIsNotNone(unmarked)
+        if unmarked.shape != marked.shape:
+            unmarked = cv2.resize(unmarked, (marked.shape[1], marked.shape[0]))
+        blended = cv2.addWeighted(marked, 0.55, unmarked, 0.45, 0)
+        canvas = self._roi_canvas(blended)
+        is_marked, marked_score, unmarked_score, contrast, mid = detector._pair_state(
+            canvas,
+            "discard_marked",
+            "discard_unmarked",
+        )
+        self.assertTrue(is_marked, f"contrast={contrast:.1f} mid={mid:.1f} tm={marked_score:.3f}/{unmarked_score:.3f}")
 
     def test_detect_prefers_lock_marked_template(self):
         from src.features.discard.mark_state import MarkStateDetector
 
-        template_dir = Path(__file__).resolve().parents[1] / "config" / "templates" / "marking"
+        template_dir = self._template_dir()
         if not (template_dir / "lock_marked.png").exists():
             self.skipTest("标记模板不存在")
         detector = MarkStateDetector(template_dir)
         marked = detector._templates.get("lock_marked")
         self.assertIsNotNone(marked)
-        canvas = np.full((120, 120), 180, dtype=np.uint8)
-        mh, mw = marked.shape[:2]
-        canvas[20 : 20 + mh, 20 : 20 + mw] = marked
-        is_marked, marked_score, unmarked_score = detector._pair_state(
+        canvas = self._roi_canvas(marked)
+        is_marked, marked_score, unmarked_score, contrast, mid = detector._pair_state(
             canvas,
             "lock_marked",
             "lock_unmarked",
         )
         self.assertTrue(is_marked)
         self.assertGreater(marked_score, unmarked_score)
+        self.assertGreaterEqual(contrast, mid)
+
+    def test_detect_prefers_lock_unmarked_template(self):
+        from src.features.discard.mark_state import MarkStateDetector
+
+        template_dir = self._template_dir()
+        if not (template_dir / "lock_unmarked.png").exists():
+            self.skipTest("标记模板不存在")
+        detector = MarkStateDetector(template_dir)
+        unmarked = detector._templates.get("lock_unmarked")
+        self.assertIsNotNone(unmarked)
+        canvas = self._roi_canvas(unmarked)
+        is_marked, _, _, contrast, mid = detector._pair_state(
+            canvas,
+            "lock_marked",
+            "lock_unmarked",
+        )
+        self.assertFalse(is_marked)
+        self.assertLess(contrast, mid)
 
 
 class MarkingExecutorButtonTest(unittest.TestCase):
@@ -563,6 +668,7 @@ class MarkingExecutorTest(unittest.TestCase):
         executor._detect_mark_states = MagicMock(
             side_effect=[
                 {"discard": False, "lock": True},
+                {"discard": False, "lock": True},
                 {"discard": False, "lock": False},
                 {"discard": False, "lock": False},
             ]
@@ -575,6 +681,37 @@ class MarkingExecutorTest(unittest.TestCase):
         self.assertTrue(result.was_locked_before)
         executor._run_macro.assert_any_call("lock")
         executor._run_macro.assert_any_call("discard")
+
+    @patch("src.features.discard.executor.BatchProcessor")
+    @patch("src.features.discard.executor.mss.mss")
+    @patch("src.features.discard.executor.GamepadScanner")
+    @patch("src.features.discard.executor.vg", create=True)
+    def test_ignore_locked_skips_discard(self, _vg, scanner_cls, _mss, _batch):
+        from src.features.discard.executor import MarkingExecutor
+
+        session = ScanSession(
+            session_id="s",
+            created_at="t",
+            total_drives=1,
+            cols=7,
+            entries=[ScanSessionEntry(1, "a", "Gold", "drive", "sig", None)],
+        )
+        scanner = MagicMock()
+        scanner.wait_for_handoff = MagicMock()
+        scanner_cls.return_value = scanner
+        executor = MarkingExecutor(
+            session,
+            template_dir=Path("config/templates/marking"),
+            config_dir=Path("config"),
+            ignore_locked=True,
+        )
+        executor._verify_entry_with_retry = MagicMock(return_value=MagicMock(shape=(100, 100, 3)))
+        executor._detect_mark_states = MagicMock(return_value={"discard": False, "lock": True})
+        executor._run_macro = MagicMock()
+        target = MarkTarget(1, "a", "drive", "Gold", "C", None, "discard")
+        result = executor._execute_mark_action(MagicMock(), target, session.entries[0])
+        self.assertEqual(result.status, "skipped_locked")
+        executor._run_macro.assert_not_called()
 
     @patch("src.features.discard.executor.BatchProcessor")
     @patch("src.features.discard.executor.mss.mss")

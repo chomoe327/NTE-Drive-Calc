@@ -13,8 +13,11 @@ from src.features.discard.executor import InventoryChangedError, MarkingExecutor
 from src.features.discard.log_store import MarkLogEntry, MarkLogSession, MarkLogStore
 from src.features.discard.page import build_marking_page
 from src.features.discard.quality_rules import (
+    MarkingOptions,
     QualityMarkRule,
+    load_marking_config,
     load_rules,
+    save_marking_config,
     save_rules,
     validate_rules,
 )
@@ -89,14 +92,15 @@ def _refresh_marking(self):
         return
     self._marking_blueprint_cache = None
     self.marking_role_selector.load_roles(getattr(self, "roles_db", {}) or {})
-    self._marking_set_rules_to_ui(load_rules(_marking_paths(self)["rules"]))
+    rules, options = load_marking_config(_marking_paths(self)["rules"])
+    self._marking_set_rules_to_ui(rules, options)
     session = load_session(_marking_paths(self)["session"])
     self._marking_session = session
     self._marking_update_session_status()
     self._marking_invalidate_preview()
 
 
-def _marking_set_rules_to_ui(self, rules: dict[str, QualityMarkRule]):
+def _marking_set_rules_to_ui(self, rules: dict[str, QualityMarkRule], options: MarkingOptions | None = None):
     widgets = getattr(self, "_marking_rule_widgets", {}) or {}
     for quality, rule in rules.items():
         row = widgets.get(quality)
@@ -112,6 +116,9 @@ def _marking_set_rules_to_ui(self, rules: dict[str, QualityMarkRule]):
             lock_combo.setCurrentIndex(lock_idx)
         row["discard_below_enabled"].setChecked(rule.discard_below_enabled)
         row["lock_above_enabled"].setChecked(rule.lock_above_enabled)
+    if options is not None and hasattr(self, "marking_ignore_no_usable_cb"):
+        self.marking_ignore_no_usable_cb.setChecked(options.ignore_no_usable_role)
+        self.marking_ignore_locked_cb.setChecked(options.ignore_locked)
     self._marking_on_rules_changed()
 
 
@@ -128,6 +135,18 @@ def _marking_get_rules_from_ui(self) -> dict[str, QualityMarkRule]:
             lock_above_enabled=bool(row["lock_above_enabled"].isChecked()),
         )
     return rules
+
+
+def _marking_get_options_from_ui(self) -> MarkingOptions:
+    return MarkingOptions(
+        ignore_no_usable_role=bool(getattr(self, "marking_ignore_no_usable_cb", None) and self.marking_ignore_no_usable_cb.isChecked()),
+        ignore_locked=bool(getattr(self, "marking_ignore_locked_cb", None) and self.marking_ignore_locked_cb.isChecked()),
+    )
+
+
+def _marking_save_config(self) -> None:
+    paths = _marking_paths(self)
+    save_marking_config(paths["rules"], self._marking_get_rules_from_ui(), self._marking_get_options_from_ui())
 
 
 def _marking_on_rules_changed(self):
@@ -182,7 +201,7 @@ def _marking_load_inventory(self):
             raise ValueError("库存文件格式异常")
         session = build_session_from_inventory(inventory)
         save_session(paths["session"], session)
-        save_rules(paths["rules"], self._marking_get_rules_from_ui())
+        self._marking_save_config()
         self._marking_session = session
         self._marking_inventory = inventory
         self._marking_update_session_status()
@@ -201,7 +220,7 @@ def _marking_start_full_scan(self):
     if not 0 < total_drives <= 2000:
         QMessageBox.warning(self, "提示", "库存数量必须在 1-2000 之间。")
         return
-    save_rules(_marking_paths(self)["rules"], self._marking_get_rules_from_ui())
+    self._marking_save_config()
     self._marking_pipeline = True
     self._replace_inventory_on_next_parse = True
     self._pending_scan_mode = "gamepad"
@@ -292,7 +311,7 @@ def _marking_calculate(self):
     if not selected:
         QMessageBox.warning(self, "提示", "请至少选择一个评分角色。")
         return
-    save_rules(_marking_paths(self)["rules"], rules)
+    save_marking_config(_marking_paths(self)["rules"], rules, self._marking_get_options_from_ui())
     self.marking_calc_btn.setEnabled(False)
     self.marking_calc_btn.setText("计算中...")
 
@@ -309,6 +328,7 @@ def _marking_calculate(self):
             inventory,
             orchestrator,
             blueprints,
+            self._marking_get_options_from_ui(),
         )
 
     self._marking_calc_worker = WorkerThread(target=_run, parent=self)
@@ -320,11 +340,16 @@ def _marking_calculate(self):
 def _marking_render_preview(self, preview: MarkPreview):
     from src.features.discard.scoring import ITEM_LABELS
 
-    self.marking_preview_summary.setText(
+    summary = (
         f"将标记弃置 {preview.discard_count} 个，将标记上锁 {preview.lock_count} 个，"
-        f"蓝色跳过 {preview.blue_skipped} 个，无可用角色 {preview.no_usable_role} 个。\n"
-        "执行时将逐格校验背包是否与快照一致。"
+        f"蓝色跳过 {preview.blue_skipped} 个，无可用角色 {preview.no_usable_role} 个"
     )
+    if preview.no_usable_role_skipped:
+        summary += f"，因忽略无可用角色跳过弃置 {preview.no_usable_role_skipped} 个"
+    summary += "。\n执行时将逐格校验背包是否与快照一致。"
+    if self._marking_get_options_from_ui().ignore_locked:
+        summary += "\n已开启「忽略已上锁」：执行时遇到上锁项将跳过弃置。"
+    self.marking_preview_summary.setText(summary)
     table = self.marking_preview_table
     table.setRowCount(len(preview.targets))
     action_labels = {"discard": "弃置", "lock": "上锁"}
@@ -373,6 +398,7 @@ def _marking_execute(self):
             template_dir=paths["templates"],
             config_dir=str(runtime.CONFIG_DIR),
             macros_path=paths["macros"],
+            ignore_locked=self._marking_get_options_from_ui().ignore_locked,
         )
         worker.executor = executor
 
@@ -432,11 +458,13 @@ def _marking_on_execute_done(self, results):
     MarkLogStore(paths["log"]).append_session(session)
     marked = sum(1 for r in results if r.status == "marked")
     skipped = sum(1 for r in results if r.status == "skipped_already_marked")
+    skipped_locked = sum(1 for r in results if r.status == "skipped_locked")
     aborted = next((r for r in results if r.status == "aborted"), None)
     if aborted:
         QMessageBox.critical(self, "执行终止", aborted.message or "背包已变动，任务已终止。")
         return
-    QMessageBox.information(self, "执行完成", f"成功标记 {marked} 个，跳过已标记 {skipped} 个。")
+    extra = f"，因已上锁跳过 {skipped_locked} 个" if skipped_locked else ""
+    QMessageBox.information(self, "执行完成", f"成功标记 {marked} 个，跳过已标记 {skipped} 个{extra}。")
 
 
 def _marking_on_execute_error(self, err):
@@ -483,6 +511,7 @@ def _marking_rollback(self):
             template_dir=paths["templates"],
             config_dir=str(runtime.CONFIG_DIR),
             macros_path=paths["macros"],
+            ignore_locked=self._marking_get_options_from_ui().ignore_locked,
         )
         worker.executor = executor
         return executor.rollback_entries(candidates)

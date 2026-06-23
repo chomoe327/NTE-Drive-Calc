@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from src.domain.grade_scoring import evaluate_item_grades
-from src.features.discard.quality_rules import Action, QualityMarkRule, resolve_action
+from src.features.discard.quality_rules import Action, MarkingOptions, QualityMarkRule, resolve_action
 from src.features.discard.scan_session import ScanSession
 from src.models.equipment import Drive, Tape
 from src.optimizer.scoring import ScoringEngine
@@ -45,6 +45,7 @@ class MarkPreview:
     lock_count: int
     blue_skipped: int
     no_usable_role: int
+    no_usable_role_skipped: int
     total_scored: int
 
 
@@ -62,10 +63,13 @@ def build_mark_preview(
     inventory: list[dict],
     orchestrator: Any,
     blueprints: dict,
+    options: MarkingOptions | None = None,
 ) -> MarkPreview:
+    options = options or MarkingOptions()
     targets: list[MarkTarget] = []
     blue_skipped = 0
     no_usable_role = 0
+    no_usable_role_skipped = 0
     total_scored = 0
     by_uid = {
         str(item.get("uid")): item
@@ -95,6 +99,13 @@ def build_mark_preview(
         action: Action | None = resolve_action(entry.quality, max_grade, rules)  # type: ignore[arg-type]
         if action is None:
             continue
+        if (
+            options.ignore_no_usable_role
+            and not had_usable
+            and action == "discard"
+        ):
+            no_usable_role_skipped += 1
+            continue
         targets.append(
             MarkTarget(
                 scan_index=entry.scan_index,
@@ -116,5 +127,6 @@ def build_mark_preview(
         lock_count=lock_count,
         blue_skipped=blue_skipped,
         no_usable_role=no_usable_role,
+        no_usable_role_skipped=no_usable_role_skipped,
         total_scored=total_scored,
     )
