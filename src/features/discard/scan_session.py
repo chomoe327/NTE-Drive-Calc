@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +25,7 @@ class ScanSessionEntry:
     item_type: str
     signature: str
     source_filename: str | None = None
+    is_duplicate_signature: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -37,6 +38,7 @@ class ScanSession:
     total_drives: int
     cols: int
     entries: list[ScanSessionEntry]
+    signature_to_indices: dict[str, list[int]] = field(default_factory=dict)
 
     def entry_by_index(self, scan_index: int) -> ScanSessionEntry | None:
         return next((e for e in self.entries if e.scan_index == scan_index), None)
@@ -48,21 +50,39 @@ class ScanSession:
             "total_drives": self.total_drives,
             "cols": self.cols,
             "entries": [e.to_dict() for e in self.entries],
+            "signature_to_indices": self.signature_to_indices,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> ScanSession:
         entries = [
-            ScanSessionEntry(**entry)
+            ScanSessionEntry(
+                scan_index=int(entry["scan_index"]),
+                uid=str(entry.get("uid") or ""),
+                quality=str(entry.get("quality") or "Gold"),
+                item_type=str(entry.get("item_type") or "drive"),
+                signature=str(entry.get("signature") or ""),
+                source_filename=entry.get("source_filename"),
+                is_duplicate_signature=bool(entry.get("is_duplicate_signature", False)),
+            )
             for entry in data.get("entries", [])
             if isinstance(entry, dict)
         ]
+        signature_to_indices = data.get("signature_to_indices")
+        if not isinstance(signature_to_indices, dict):
+            signature_to_indices = build_signature_to_indices(entries)
+        _apply_duplicate_flags(entries, signature_to_indices)
         return cls(
             session_id=str(data.get("session_id") or uuid.uuid4()),
             created_at=str(data.get("created_at") or _now_iso()),
             total_drives=int(data.get("total_drives") or 0),
             cols=int(data.get("cols") or 7),
             entries=entries,
+            signature_to_indices={
+                str(sig): [int(i) for i in indices]
+                for sig, indices in signature_to_indices.items()
+                if isinstance(indices, list)
+            },
         )
 
 
@@ -72,6 +92,23 @@ def _now_iso() -> str:
 
 def signature_from_item_dict(item: dict) -> str:
     return equipment_identity_signature(item)
+
+
+def build_signature_to_indices(entries: list[ScanSessionEntry]) -> dict[str, list[int]]:
+    index: dict[str, list[int]] = {}
+    for entry in entries:
+        index.setdefault(entry.signature, []).append(entry.scan_index)
+    for indices in index.values():
+        indices.sort()
+    return index
+
+
+def _apply_duplicate_flags(
+    entries: list[ScanSessionEntry],
+    signature_to_indices: dict[str, list[int]],
+) -> None:
+    for entry in entries:
+        entry.is_duplicate_signature = len(signature_to_indices.get(entry.signature, [])) > 1
 
 
 def build_session_from_inventory(
@@ -92,13 +129,14 @@ def build_session_from_inventory(
     for item in items:
         scan_index = int(item["scan_index"])
         filenames = source_filenames or {}
+        signature = signature_from_item_dict(item)
         entries.append(
             ScanSessionEntry(
                 scan_index=scan_index,
                 uid=str(item.get("uid") or ""),
                 quality=str(item.get("quality") or "Gold"),
                 item_type=str(item.get("item_type") or "drive"),
-                signature=signature_from_item_dict(item),
+                signature=signature,
                 source_filename=filenames.get(scan_index),
             )
         )
@@ -106,12 +144,19 @@ def build_session_from_inventory(
     total = max((e.scan_index for e in entries), default=0)
     if len(entries) != total:
         raise ValueError("scan_index 不连续或存在重复，请重新全量扫描。")
+
+    signature_to_indices = build_signature_to_indices(entries)
+    _apply_duplicate_flags(entries, signature_to_indices)
+    for item in items:
+        item["is_duplicate_signature"] = len(signature_to_indices.get(signature_from_item_dict(item), [])) > 1
+
     return ScanSession(
         session_id=str(uuid.uuid4()),
         created_at=_now_iso(),
         total_drives=total,
         cols=7,
         entries=entries,
+        signature_to_indices=signature_to_indices,
     )
 
 

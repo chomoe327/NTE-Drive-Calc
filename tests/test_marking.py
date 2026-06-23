@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import numpy as np
 
@@ -32,11 +32,12 @@ from src.models.equipment import Drive, Tape
 from src.scanner.grid_navigation import (
     COLS,
     _INVERT_MOVE,
+    cols_in_row,
     generate_path_commands,
     generate_scan_order,
+    index_after_moves,
+    index_to_position,
     moves_between_scan_indices,
-    moves_between_scan_indices_along_scan_path,
-    moves_between_scan_indices_horizontal_first,
     moves_for_scan_index,
     scan_index_for_position,
 )
@@ -182,6 +183,17 @@ class MarkingScanSessionTest(unittest.TestCase):
             signature_from_item_dict(parsed_item),
         )
 
+    def test_duplicate_signature_flags(self):
+        inventory = [_drive("a", 1), _drive("b", 2), _drive("c", 3, shape_id="H4")]
+        session = build_session_from_inventory(inventory)
+        dup_sig = signature_from_item_dict(inventory[0])
+        self.assertEqual(session.signature_to_indices[dup_sig], [1, 2])
+        self.assertTrue(session.entries[0].is_duplicate_signature)
+        self.assertTrue(session.entries[1].is_duplicate_signature)
+        self.assertFalse(session.entries[2].is_duplicate_signature)
+        self.assertTrue(inventory[0]["is_duplicate_signature"])
+        self.assertFalse(inventory[2]["is_duplicate_signature"])
+
 
 class MarkingScoringTest(unittest.TestCase):
     def _mock_orchestrator(self):
@@ -284,53 +296,18 @@ class MarkingLogStoreTest(unittest.TestCase):
         self.assertEqual([e.scan_index for e in candidates], [2, 1])
 
 
-class AnchorNavigationTest(unittest.TestCase):
-    def _simulate_anchor(self, start_row: int, start_col: int, total: int = 135, cols: int = 7):
-        rows = max(1, (total + cols - 1) // cols)
-        row, col = start_row, start_col
-        moves: list[str] = []
-
-        def done() -> bool:
-            return row == 0 and col == 0
-
-        def apply_step(direction: str) -> None:
-            nonlocal row, col
-            moves.append(direction)
-            if direction == "L":
-                col = max(0, col - 1)
-            elif direction == "U":
-                row = max(0, row - 1)
-
-        if done():
-            return moves, row, col
-        for _ in range(cols):
-            if done():
-                break
-            apply_step("L")
-        if done():
-            return moves, row, col
-        for _ in range(rows - 1):
-            if done():
-                break
-            apply_step("U")
-            for _ in range(cols):
-                if done():
-                    break
-                apply_step("L")
-        return moves, row, col
-
-    def test_from_first_row_end_only_moves_left(self):
-        moves, row, col = self._simulate_anchor(0, 6)
-        self.assertEqual((row, col), (0, 0))
-        self.assertEqual(moves.count("U"), 0)
-
-    def test_from_lower_row_uses_up_then_left(self):
-        moves, row, col = self._simulate_anchor(3, 2)
-        self.assertEqual((row, col), (0, 0))
-        self.assertGreater(moves.count("U"), 0)
-
-
 class GridNavigationTest(unittest.TestCase):
+    def test_index_to_position_last_row(self):
+        row, col = index_to_position(135, 135)
+        self.assertEqual((row, col), (19, 0))
+
+    def test_cols_in_row_partial_last_row(self):
+        self.assertEqual(cols_in_row(19, 135), 2)
+        self.assertEqual(cols_in_row(18, 135), 7)
+
+    def test_index_after_moves(self):
+        self.assertEqual(index_after_moves(1, ["D", "D"], 135), 15)
+
     def test_moves_for_scan_index_matches_path(self):
         paths = generate_path_commands(10)
         self.assertEqual(moves_for_scan_index(1, 10), paths[0])
@@ -351,23 +328,6 @@ class GridNavigationTest(unittest.TestCase):
         scan_steps = sum(len(step) for step in path[1:])
         self.assertLess(len(marking_jump), scan_steps)
 
-    def test_direct_navigation_shorter_than_scan_path(self):
-        total = 135
-        direct = moves_between_scan_indices(1, 135, total)
-        along = moves_between_scan_indices_along_scan_path(1, 135, total)
-        self.assertLess(len(direct), len(along))
-        self.assertEqual(_index_after_grid_moves(1, direct, total), 135)
-
-    def test_vertical_first_matches_horizontal_first_on_grid(self):
-        total = 135
-        for start, end in ((1, 135), (3, 8), (20, 88)):
-            vertical = moves_between_scan_indices(start, end, total)
-            horizontal = moves_between_scan_indices_horizontal_first(start, end, total)
-            self.assertEqual(
-                _index_after_grid_moves(start, vertical, total),
-                _index_after_grid_moves(start, horizontal, total),
-            )
-
     def test_moves_between_backward_returns_to_start(self):
         total = 12
         for start, end in ((1, 7), (3, 8), (1, 12), (8, 12)):
@@ -375,6 +335,99 @@ class GridNavigationTest(unittest.TestCase):
             backward = moves_between_scan_indices(end, start, total)
             landed = _index_after_grid_moves(start, forward + backward, total)
             self.assertEqual(landed, start, f"{start}->{end} 往返后应回到第 {start} 格")
+
+
+class OcrGridNavigatorTest(unittest.TestCase):
+    def _session_with_duplicates(self) -> ScanSession:
+        inventory = [_drive("a", 1), _drive("b", 2), _drive("c", 3, shape_id="H4")]
+        return build_session_from_inventory(inventory)
+
+    def test_locate_resolved_unique_signature(self):
+        from src.scanner.ocr_grid_navigator import OcrGridNavigator
+
+        session = self._session_with_duplicates()
+        scanner = MagicMock()
+        navigator = OcrGridNavigator(
+            session,
+            scanner,
+            capture_bgr=MagicMock(return_value=np.zeros((10, 10, 3), dtype=np.uint8)),
+            parse_item_dict=MagicMock(return_value=_drive("c", 99, shape_id="H4")),
+            signature_looks_unreadable=lambda _: False,
+        )
+        pos = navigator.locate_resolved(MagicMock())
+        self.assertEqual(pos.scan_index, 3)
+
+    def test_locate_resolved_probe_stays_on_anchor(self):
+        from src.scanner.ocr_grid_navigator import OcrGridNavigator
+
+        session = self._session_with_duplicates()
+        dup_item = _drive("a", 1)
+        unique_item = _drive("c", 3, shape_id="H4")
+        scanner = MagicMock()
+        parse_results = [dup_item, unique_item]
+        navigator = OcrGridNavigator(
+            session,
+            scanner,
+            capture_bgr=MagicMock(return_value=np.zeros((10, 10, 3), dtype=np.uint8)),
+            parse_item_dict=MagicMock(side_effect=lambda _img: parse_results.pop(0)),
+            signature_looks_unreadable=lambda _: False,
+        )
+        pos = navigator.locate_resolved(MagicMock())
+        self.assertEqual(pos.scan_index, 3)
+        scanner.apply_moves_batch.assert_called_with(["R"])
+
+    def test_navigate_to_retries_then_raises(self):
+        from src.scanner.ocr_grid_navigator import OcrGridNavigator
+
+        session = self._session_with_duplicates()
+        scanner = MagicMock()
+        navigator = OcrGridNavigator(
+            session,
+            scanner,
+            capture_bgr=MagicMock(return_value=np.zeros((10, 10, 3), dtype=np.uint8)),
+            parse_item_dict=MagicMock(return_value=_drive("a", 1)),
+            signature_looks_unreadable=lambda _: False,
+        )
+        navigator._verify_target_signature = MagicMock(return_value=False)
+        navigator.locate_resolved = MagicMock(
+            return_value=__import__(
+                "src.scanner.ocr_grid_navigator", fromlist=["GridPosition"]
+            ).GridPosition(1, 0, 0)
+        )
+        with self.assertRaises(InventoryChangedError):
+            navigator.navigate_to(MagicMock(), 2)
+
+    def test_navigate_to_uses_start_index_on_first_attempt(self):
+        from src.scanner.ocr_grid_navigator import GridPosition, OcrGridNavigator
+
+        session = self._session_with_duplicates()
+        scanner = MagicMock()
+        navigator = OcrGridNavigator(
+            session,
+            scanner,
+            capture_bgr=MagicMock(return_value=np.zeros((10, 10, 3), dtype=np.uint8)),
+            parse_item_dict=MagicMock(return_value=_drive("c", 3, shape_id="H4")),
+            signature_looks_unreadable=lambda _: False,
+        )
+        navigator.locate_resolved = MagicMock()
+        navigator._verify_target_signature = MagicMock(return_value=True)
+        pos = navigator.navigate_to(MagicMock(), 3, start_index=3)
+        self.assertEqual(pos.scan_index, 3)
+        navigator.locate_resolved.assert_not_called()
+
+
+class GamepadScannerBatchTest(unittest.TestCase):
+    def test_apply_moves_batch_uses_single_step_scan_pace(self):
+        from src.scanner.gamepad_controller import GamepadScanner
+
+        scanner = GamepadScanner.__new__(GamepadScanner)
+        scanner._stopped = False
+        scanner._apply_moves = MagicMock()
+        scanner.apply_moves_batch(["R", "D", "L"])
+        self.assertEqual(scanner._apply_moves.call_count, 3)
+        for call in scanner._apply_moves.call_args_list:
+            self.assertEqual(call.args[0], [call.args[0][0]])
+            self.assertEqual(call.kwargs.get("pace"), "scan")
 
 
 class MarkStateDetectorTest(unittest.TestCase):
@@ -458,7 +511,6 @@ class MarkingExecutorTest(unittest.TestCase):
         )
         scanner = MagicMock()
         scanner.wait_for_handoff = MagicMock()
-        scanner.anchor_to_first_cell = MagicMock()
         scanner_cls.return_value = scanner
         executor = MarkingExecutor(
             session,
@@ -466,7 +518,10 @@ class MarkingExecutorTest(unittest.TestCase):
             config_dir=Path("config"),
         )
         executor.detector.detect_from_bgr = MagicMock(return_value={"discard": False, "lock": False})
-        executor._verify_entry_with_retry = MagicMock(return_value=MagicMock(shape=(100, 100, 3)))
+        mock_navigator = MagicMock()
+        executor._connect = MagicMock()
+        executor.scanner = scanner
+        executor.navigator = mock_navigator
         executor._detect_mark_states = MagicMock(return_value={"discard": False, "lock": False})
         executor._execute_mark_action = MagicMock(
             side_effect=lambda sct, target, entry: MarkStepResult(
@@ -478,12 +533,9 @@ class MarkingExecutorTest(unittest.TestCase):
             MarkTarget(8, "u8", "drive", "Gold", "C", None, "lock"),
         ]
         executor.execute_targets(targets)
-        scanner.anchor_to_first_cell.assert_called_once()
-        for call in scanner._apply_moves.call_args_list:
-            self.assertEqual(call.kwargs.get("pace"), "marking")
-        moves = [call.args[0] for call in scanner._apply_moves.call_args_list]
-        self.assertEqual(moves[0], moves_between_scan_indices(1, 3, 12))
-        self.assertEqual(moves[1], moves_between_scan_indices(3, 8, 12))
+        self.assertEqual(mock_navigator.navigate_to.call_count, 2)
+        mock_navigator.navigate_to.assert_any_call(ANY, 3, start_index=None)
+        mock_navigator.navigate_to.assert_any_call(ANY, 8, start_index=3)
 
     @patch("src.features.discard.executor.BatchProcessor")
     @patch("src.features.discard.executor.mss.mss")
@@ -501,7 +553,6 @@ class MarkingExecutorTest(unittest.TestCase):
         )
         scanner = MagicMock()
         scanner.wait_for_handoff = MagicMock()
-        scanner.anchor_to_first_cell = MagicMock()
         scanner_cls.return_value = scanner
         executor = MarkingExecutor(
             session,
@@ -542,7 +593,6 @@ class MarkingExecutorTest(unittest.TestCase):
         )
         scanner = MagicMock()
         scanner.wait_for_handoff = MagicMock()
-        scanner.anchor_to_first_cell = MagicMock()
         scanner_cls.return_value = scanner
         executor = MarkingExecutor(
             session,
@@ -552,6 +602,7 @@ class MarkingExecutorTest(unittest.TestCase):
         executor._verify_entry_with_retry = MagicMock(return_value=MagicMock(shape=(100, 100, 3)))
         executor._detect_mark_states = MagicMock(
             side_effect=[
+                {"discard": True, "lock": False},
                 {"discard": True, "lock": False},
                 {"discard": False, "lock": False},
             ]
@@ -618,7 +669,6 @@ class MarkingExecutorTest(unittest.TestCase):
         )
         scanner = MagicMock()
         scanner.wait_for_handoff = MagicMock()
-        scanner.anchor_to_first_cell = MagicMock()
         scanner_cls.return_value = scanner
         executor = MarkingExecutor(
             session,
@@ -626,6 +676,9 @@ class MarkingExecutorTest(unittest.TestCase):
             config_dir=Path("config"),
         )
         executor.detector.detect_from_bgr = MagicMock(return_value={"discard": True, "lock": False})
+        executor._connect = MagicMock()
+        executor.scanner = scanner
+        executor.navigator = MagicMock()
         executor._verify_entry_with_retry = MagicMock(return_value=MagicMock(shape=(100, 100, 3)))
         executor._detect_mark_states = MagicMock(return_value={"discard": True, "lock": False})
         executor._capture_bgr = MagicMock(return_value=MagicMock(shape=(100, 100, 3)))

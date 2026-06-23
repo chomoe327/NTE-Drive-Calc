@@ -52,6 +52,23 @@ def moves_for_scan_index(scan_index: int, total_drives: int, cols: int = COLS) -
 
 
 _INVERT_MOVE = {"R": "L", "L": "R", "D": "U", "U": "D"}
+MOVE_DELTAS = {"R": (0, 1), "L": (0, -1), "D": (1, 0), "U": (-1, 0)}
+
+
+def cols_in_row(row: int, total_drives: int, cols: int = COLS) -> int:
+    if row < 0:
+        return 0
+    return min(cols, max(0, total_drives - row * cols))
+
+
+def index_to_position(scan_index: int, total_drives: int, cols: int = COLS) -> tuple[int, int]:
+    if not 1 <= scan_index <= total_drives:
+        raise ValueError(f"scan_index {scan_index} 超出范围 1-{total_drives}")
+    return generate_scan_order(total_drives, cols)[scan_index - 1]
+
+
+def position_to_index(row: int, col: int, total_drives: int, cols: int = COLS) -> int:
+    return scan_index_for_position(row, col, total_drives, cols)
 
 
 def scan_index_for_position(
@@ -106,62 +123,15 @@ def moves_between_scan_indices(
     return moves
 
 
-def moves_between_scan_indices_along_scan_path(
+def index_after_moves(
     from_index: int,
-    to_index: int,
+    moves: list[str],
     total_drives: int,
     cols: int = COLS,
-) -> list[str]:
-    """Step through every intermediate cell along the full-scan S-curve path."""
-    if from_index == to_index:
-        return []
-    if not 1 <= from_index <= total_drives or not 1 <= to_index <= total_drives:
-        raise ValueError(f"scan_index 超出范围 1-{total_drives}")
-    paths = generate_path_commands(total_drives, cols)
-    if to_index > from_index:
-        moves: list[str] = []
-        for step in range(from_index, to_index):
-            moves.extend(paths[step])
-        return moves
-    moves: list[str] = []
-    for step in range(to_index, from_index):
-        moves.extend(paths[step])
-    return [_INVERT_MOVE[move] for move in reversed(moves)]
-
-
-def moves_between_scan_indices_horizontal_first(
-    from_index: int,
-    to_index: int,
-    total_drives: int,
-    cols: int = COLS,
-) -> list[str]:
-    """Horizontal moves before vertical (kept for comparison / fallback experiments)."""
-    if from_index == to_index:
-        return []
-    if not 1 <= from_index <= total_drives or not 1 <= to_index <= total_drives:
-        raise ValueError(f"scan_index 超出范围 1-{total_drives}")
-    order = generate_scan_order(total_drives, cols)
-    row, col = order[from_index - 1]
-    target_row, target_col = order[to_index - 1]
-    moves: list[str] = []
-    if to_index > from_index:
-        while col < target_col:
-            moves.append("R")
-            col += 1
-        while col > target_col:
-            moves.append("L")
-            col -= 1
-        while row < target_row:
-            moves.append("D")
-            row += 1
-        return moves
-    while row > target_row:
-        moves.append("U")
-        row -= 1
-    while col > target_col:
-        moves.append("L")
-        col -= 1
-    while col < target_col:
-        moves.append("R")
-        col += 1
-    return moves
+) -> int:
+    row, col = index_to_position(from_index, total_drives, cols)
+    for move in moves:
+        dr, dc = MOVE_DELTAS[move]
+        row += dr
+        col += dc
+    return position_to_index(row, col, total_drives, cols)

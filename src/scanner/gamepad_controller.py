@@ -4,7 +4,6 @@
 import os
 import shutil
 import time
-from collections.abc import Callable
 
 import mss
 import mss.tools
@@ -123,62 +122,24 @@ class GamepadScanner:
             elif move == "U":
                 self.push_left_joystick(0.0, 1.0, pace=pace)
 
-    def anchor_to_first_cell(
-        self,
-        total_drives: int,
-        cols: int | None = None,
-        *,
-        is_at_first_cell: Callable[[], bool] | None = None,
-    ) -> None:
-        """Return selection to scan index 1 using single-step U/L with OCR checks."""
-        cols = cols or self.cols
-        rows = max(1, (int(total_drives) + cols - 1) // cols)
-        time.sleep(0.25)
-
-        def _done() -> bool:
-            return bool(is_at_first_cell and is_at_first_cell())
-
-        if _done():
-            logger.info("已在第一格，跳过归位")
-            return
-
-        logger.info("自动归位到第一格（逐步移动并校验）")
-
-        for _ in range(cols):
-            if _done():
-                logger.info("归位完成（左移）")
+    def apply_moves_batch(self, moves: list[str]) -> None:
+        """Apply each move individually at scan pace for reliable grid traversal."""
+        for index, move in enumerate(moves):
+            if self._stopped:
                 return
-            self._apply_moves(["L"], pace="marking")
-
-        if _done():
-            logger.info("归位完成（左移）")
-            return
-
-        for _ in range(rows - 1):
-            if _done():
-                logger.info("归位完成（上行）")
-                return
-            self._apply_moves(["U"], pace="marking")
-            for _ in range(cols):
-                if _done():
-                    logger.info("归位完成（上行后左移）")
-                    return
-                self._apply_moves(["L"], pace="marking")
-
-        time.sleep(0.2)
+            if index > 0 and index % 10 == 0:
+                time.sleep(0.15)
+            self._apply_moves([move], pace="scan")
 
     def _generate_path(self, total_drives: int) -> list:
         from src.scanner.grid_navigation import generate_path_commands
 
         return generate_path_commands(total_drives, self.cols)
 
-    def wait_for_handoff(self, *, for_marking: bool = False) -> None:
+    def wait_for_handoff(self) -> None:
         logger.warning("\n" + "=" * 50)
         logger.warning("虚拟手柄已就位，将在 3 秒后接管控制，请切回游戏")
-        if for_marking:
-            logger.warning("请停留在驱动/卡带仓库页面，程序将自动归位到第一格")
-        else:
-            logger.warning("请确保此时已选中第一排第一个驱动/卡带")
+        logger.warning("请确保已选中仓库第一格（第一排第一个驱动/卡带）")
         logger.warning("=" * 50)
         time.sleep(self.HANDOFF_DELAY_SEC)
 

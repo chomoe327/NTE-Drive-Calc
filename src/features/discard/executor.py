@@ -13,17 +13,15 @@ from typing import Callable
 
 import cv2
 import mss
-import mss.tools
 import numpy as np
 
 from src.features.discard.mark_state import MarkStateDetector
 from src.features.discard.scan_session import InventoryChangedError, ScanSession, signature_from_item_dict, verify_signature
 from src.features.discard.scoring import MarkTarget
 from src.scanner.batch_processor import BatchProcessor
-from src.scanner.gamepad_controller import GamepadScanner, ViGEmDriverNotReadyError
-from src.scanner.grid_navigation import moves_between_scan_indices
+from src.scanner.gamepad_controller import GamepadScanner
+from src.scanner.ocr_grid_navigator import OcrGridNavigator
 from src.scanner.window_capture import capture_foreground_window, crop_window_border_from_image
-from src.utils.image_io import imread_unicode
 from src.utils.logger import logger
 
 try:
@@ -81,6 +79,7 @@ class MarkingExecutor:
         self.detector = MarkStateDetector(self.template_dir)
         self._stopped = False
         self.scanner: GamepadScanner | None = None
+        self.navigator: OcrGridNavigator | None = None
         self._macros = self._load_macros()
         self._processor = BatchProcessor(
             input_dir=tempfile.gettempdir(),
@@ -264,6 +263,16 @@ class MarkingExecutor:
     def _connect(self) -> None:
         if self.scanner is None:
             self.scanner = GamepadScanner(output_dir=tempfile.mkdtemp(prefix="marking_scan_"))
+        if self.navigator is None:
+            assert self.scanner is not None
+            self.navigator = OcrGridNavigator(
+                self.session,
+                self.scanner,
+                capture_bgr=lambda sct: self._capture_bgr(sct),
+                parse_item_dict=self._parse_item_dict,
+                signature_looks_unreadable=self._signature_looks_unreadable,
+                is_stopped=lambda: self._stopped,
+            )
 
     def _press_button(self, button_name: str, hold_ms: int = 80) -> None:
         if vg is None or not self.scanner:
@@ -294,73 +303,6 @@ class MarkingExecutor:
             arr = arr[:, :, :3]
         return crop_window_border_from_image(arr)
 
-    def _verify_current_drive(self, image_bgr: np.ndarray, entry) -> None:
-        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        tmp_path = tmp.name
-        tmp.close()
-        try:
-            cv2.imwrite(tmp_path, image_bgr)
-            item = self._processor._process_single_image(tmp_path)
-            actual = signature_from_item_dict(item.model_dump())
-            if entry.signature != actual:
-                logger.warning(
-                    f"第 {entry.scan_index} 格签名校验失败 | 期望={entry.signature} | 实际={actual}"
-                )
-            verify_signature(entry.signature, actual)
-        finally:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-
-    def _verify_entry_at_current_cell(self, image_bgr: np.ndarray, entry) -> None:
-        try:
-            self._verify_current_drive(image_bgr, entry)
-        except InventoryChangedError as exc:
-            raise InventoryChangedError(
-                f"第 {entry.scan_index} 格装备与快照不一致（{exc}）。"
-                "请确认已选中第一排第一个格子，且背包未手动变动。"
-            ) from exc
-
-    def _navigate_between(self, from_index: int, to_index: int) -> None:
-        assert self.scanner is not None
-        moves = moves_between_scan_indices(
-            from_index,
-            to_index,
-            self.session.total_drives,
-            self.session.cols,
-        )
-        self.scanner._apply_moves(moves, pace="marking")
-        extra = min(0.35, len(moves) * 0.003)
-        self._wait_panel_settle(extra)
-
-    def _matches_first_cell(self, sct, entry) -> bool:
-        if entry is None:
-            return False
-        try:
-            self._verify_current_drive(self._capture_bgr(sct), entry)
-            return True
-        except InventoryChangedError:
-            return False
-
-    def _prepare_at_first_cell(self, sct) -> None:
-        assert self.scanner is not None
-        entry = self.session.entry_by_index(1)
-        self.scanner.anchor_to_first_cell(
-            self.session.total_drives,
-            self.session.cols,
-            is_at_first_cell=lambda: self._matches_first_cell(sct, entry),
-        )
-        if entry is None:
-            return
-        try:
-            self._verify_entry_with_retry(sct, entry)
-        except InventoryChangedError as exc:
-            raise InventoryChangedError(
-                f"自动归位后第 1 格校验失败（{exc}）。"
-                "请确认在仓库页面且背包与扫描会话一致。"
-            ) from exc
-
     def execute_targets(
         self,
         targets: list[MarkTarget],
@@ -368,14 +310,13 @@ class MarkingExecutor:
         on_progress: Callable[[int, int, MarkStepResult], None] | None = None,
     ) -> list[MarkStepResult]:
         self._connect()
-        assert self.scanner is not None
+        assert self.scanner is not None and self.navigator is not None
         self._stopped = False
-        self.scanner.wait_for_handoff(for_marking=True)
+        self.scanner.wait_for_handoff()
         results: list[MarkStepResult] = []
         total = len(targets)
-        current_index = 1
+        current_index: int | None = None
         with mss.mss() as sct:
-            self._prepare_at_first_cell(sct)
             for idx, target in enumerate(targets, 1):
                 if self._stopped:
                     break
@@ -386,7 +327,7 @@ class MarkingExecutor:
                     if on_progress:
                         on_progress(idx, total, result)
                     continue
-                self._navigate_between(current_index, target.scan_index)
+                self.navigator.navigate_to(sct, target.scan_index, start_index=current_index)
                 current_index = target.scan_index
                 try:
                     result = self._execute_mark_action(sct, target, entry)
@@ -408,21 +349,20 @@ class MarkingExecutor:
         on_progress: Callable[[int, int, MarkStepResult], None] | None = None,
     ) -> list[MarkStepResult]:
         self._connect()
-        assert self.scanner is not None
+        assert self.scanner is not None and self.navigator is not None
         self._stopped = False
-        self.scanner.wait_for_handoff(for_marking=True)
+        self.scanner.wait_for_handoff()
         results: list[MarkStepResult] = []
         total = len(entries)
-        current_index = 1
+        current_index: int | None = None
         with mss.mss() as sct:
-            self._prepare_at_first_cell(sct)
             for idx, entry in enumerate(entries, 1):
                 if self._stopped:
                     break
                 session_entry = self.session.entry_by_index(entry.scan_index)
                 if session_entry is None:
                     continue
-                self._navigate_between(current_index, entry.scan_index)
+                self.navigator.navigate_to(sct, entry.scan_index, start_index=current_index)
                 current_index = entry.scan_index
                 try:
                     result = self._rollback_log_entry(sct, entry, session_entry)

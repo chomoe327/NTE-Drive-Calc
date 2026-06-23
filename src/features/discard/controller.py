@@ -209,7 +209,7 @@ def _marking_start_full_scan(self):
         self,
         "全量扫描准备",
         "点击 OK 后程序会最小化并开始全量扫描。\n\n"
-        "请切换至游戏的驱动/卡带仓库页面，程序将自动归位到第一格。",
+        "请切换至游戏的驱动/卡带仓库页面，并确保已选中第一格（第一排第一个驱动/卡带）。",
     )
     self.showMinimized()
     from src.app.workers import GamepadScanWorkerThread
@@ -389,7 +389,7 @@ def _marking_execute(self):
     self._marking_prepare_gamepad_action(
         "执行标记准备",
         "点击 OK 后程序会最小化并开始自动标记。\n\n"
-        "请切换至游戏的驱动/卡带仓库页面，程序将自动归位到第一格。\n"
+        "请切换至游戏的驱动/卡带仓库页面，并确保已选中第一格（第一排第一个驱动/卡带）。\n"
         "程序会在短暂倒计时后接管虚拟手柄。",
     )
     self._marking_exec_worker = MarkingWorkerThread(target=_run, parent=self)
@@ -490,7 +490,7 @@ def _marking_rollback(self):
     self._marking_prepare_gamepad_action(
         "回滚标记准备",
         "点击 OK 后程序会最小化并开始回滚上次标记。\n\n"
-        "请切换至游戏的驱动/卡带仓库页面，程序将自动归位到第一格。\n"
+        "请切换至游戏的驱动/卡带仓库页面，并确保已选中第一格（第一排第一个驱动/卡带）。\n"
         "程序会在短暂倒计时后接管虚拟手柄。",
     )
     self.marking_rollback_btn.setEnabled(False)
