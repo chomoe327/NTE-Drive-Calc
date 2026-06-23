@@ -52,12 +52,18 @@ def _resolve_xusb_button(button_name: str):
     return None
 
 
+MARKING_PANEL_SETTLE_SEC = 0.45
+MARKING_VERIFY_ATTEMPTS = 4
+MARKING_VERIFY_RETRY_DELAY_SEC = 0.4
+
+
 @dataclass
 class MarkStepResult:
     scan_index: int
     action: str
     status: str
     message: str = ""
+    was_locked_before: bool = False
 
 
 class MarkingExecutor:
@@ -102,9 +108,158 @@ class MarkingExecutor:
                 except Exception:
                     continue
         return {
-            "discard": [{"button": "DPAD_LEFT", "hold_ms": 80, "after_ms": 200}],
-            "lock": [{"button": "DPAD_RIGHT", "hold_ms": 80, "after_ms": 200}],
+            "discard": [{"button": "DPAD_LEFT", "hold_ms": 80, "after_ms": 250}],
+            "lock": [{"button": "DPAD_RIGHT", "hold_ms": 80, "after_ms": 250}],
+            "confirm": [{"button": "A", "hold_ms": 80, "after_ms": 300}],
         }
+
+    def _wait_panel_settle(self, extra: float = 0.0) -> None:
+        time.sleep(MARKING_PANEL_SETTLE_SEC + max(0.0, extra))
+
+    def _parse_item_dict(self, image_bgr: np.ndarray) -> dict:
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        tmp_path = tmp.name
+        tmp.close()
+        try:
+            cv2.imwrite(tmp_path, image_bgr)
+            item = self._processor._process_single_image(tmp_path)
+            return item.model_dump()
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    def _signature_looks_unreadable(self, item_dict: dict) -> bool:
+        if item_dict.get("item_type") == "tape":
+            return (
+                str(item_dict.get("set_name") or "") in ("", "未知套装")
+                or str(item_dict.get("main_stats") or "") in ("", "未知主词条")
+                or not item_dict.get("sub_stats")
+            )
+        if item_dict.get("item_type") == "drive":
+            return (
+                str(item_dict.get("shape_id") or "") in ("", "Unknown")
+                or not item_dict.get("main_stats")
+            )
+        return True
+
+    def _verify_entry_with_retry(self, sct, entry) -> np.ndarray:
+        last_error: InventoryChangedError | None = None
+        for attempt in range(1, MARKING_VERIFY_ATTEMPTS + 1):
+            if attempt > 1:
+                time.sleep(MARKING_VERIFY_RETRY_DELAY_SEC)
+            image_bgr = self._capture_bgr(sct)
+            try:
+                item_dict = self._parse_item_dict(image_bgr)
+                if self._signature_looks_unreadable(item_dict):
+                    raise InventoryChangedError("详情面板尚未加载完成或截图无法识别")
+                actual = signature_from_item_dict(item_dict)
+                if entry.signature != actual:
+                    logger.warning(
+                        f"第 {entry.scan_index} 格签名校验失败(尝试 {attempt}/{MARKING_VERIFY_ATTEMPTS}) "
+                        f"| 期望={entry.signature} | 实际={actual}"
+                    )
+                verify_signature(entry.signature, actual)
+                return image_bgr
+            except InventoryChangedError as exc:
+                last_error = exc
+                logger.debug(
+                    f"第 {entry.scan_index} 格校验重试 {attempt}/{MARKING_VERIFY_ATTEMPTS}: {exc}"
+                )
+        assert last_error is not None
+        raise InventoryChangedError(
+            f"第 {entry.scan_index} 格装备与快照不一致（{last_error}）。"
+            "请确认背包与扫描会话一致。"
+        ) from last_error
+
+    def _detect_mark_states(self, image_bgr: np.ndarray, scan_index: int) -> dict[str, bool | float]:
+        states = self.detector.detect_from_bgr(image_bgr)
+        logger.info(
+            f"第 {scan_index} 格标记状态 discard="
+            f"{float(states.get('discard_marked_score', 0.0)):.3f}/"
+            f"{float(states.get('discard_unmarked_score', 0.0)):.3f} "
+            f"lock={float(states.get('lock_marked_score', 0.0)):.3f}/"
+            f"{float(states.get('lock_unmarked_score', 0.0)):.3f} "
+            f"=> discard={bool(states.get('discard'))} lock={bool(states.get('lock'))}"
+        )
+        return states
+
+    def _ensure_unlocked_for_discard(self, sct, image_bgr: np.ndarray, scan_index: int) -> tuple[np.ndarray, bool]:
+        states = self._detect_mark_states(image_bgr, scan_index)
+        was_locked = bool(states.get("lock"))
+        if not was_locked:
+            return image_bgr, False
+        logger.info(f"第 {scan_index} 格已上锁，先解锁再弃置")
+        self._run_macro("lock")
+        self._wait_panel_settle(0.15)
+        image_bgr = self._capture_bgr(sct)
+        self._detect_mark_states(image_bgr, scan_index)
+        return image_bgr, True
+
+    def _execute_mark_action(self, sct, target: MarkTarget, entry) -> MarkStepResult:
+        image_bgr = self._verify_entry_with_retry(sct, entry)
+        was_locked_before = False
+        if target.action == "discard":
+            image_bgr, was_locked_before = self._ensure_unlocked_for_discard(sct, image_bgr, target.scan_index)
+            states = self._detect_mark_states(image_bgr, target.scan_index)
+            if states.get("discard"):
+                return MarkStepResult(target.scan_index, target.action, "skipped_already_marked")
+            self._run_macro("discard")
+        elif target.action == "lock":
+            states = self._detect_mark_states(image_bgr, target.scan_index)
+            if states.get("lock"):
+                return MarkStepResult(target.scan_index, target.action, "skipped_already_marked")
+            self._run_macro("lock")
+        else:
+            return MarkStepResult(target.scan_index, target.action, "error", f"未知动作: {target.action}")
+        time.sleep(0.25)
+        return MarkStepResult(
+            target.scan_index,
+            target.action,
+            "marked",
+            was_locked_before=was_locked_before,
+        )
+
+    def _rollback_log_entry(self, sct, log_entry, session_entry) -> MarkStepResult:
+        image_bgr = self._verify_entry_with_retry(sct, session_entry)
+        restore_lock = bool(getattr(log_entry, "was_locked_before", False))
+
+        if log_entry.action == "discard":
+            image_bgr, _ = self._ensure_unlocked_for_discard(sct, image_bgr, log_entry.scan_index)
+            states = self._detect_mark_states(image_bgr, log_entry.scan_index)
+            if not states.get("discard"):
+                return MarkStepResult(log_entry.scan_index, log_entry.action, "skipped_not_marked")
+            self._run_macro("discard")
+            time.sleep(0.25)
+            if restore_lock:
+                image_bgr = self._capture_bgr(sct)
+                states = self._detect_mark_states(image_bgr, log_entry.scan_index)
+                if not states.get("lock"):
+                    logger.info(f"第 {log_entry.scan_index} 格回滚弃置后恢复上锁")
+                    self._run_macro("lock")
+                    time.sleep(0.25)
+            return MarkStepResult(
+                log_entry.scan_index,
+                log_entry.action,
+                "unmarked",
+                was_locked_before=restore_lock,
+            )
+
+        if log_entry.action == "lock":
+            states = self._detect_mark_states(image_bgr, log_entry.scan_index)
+            if not states.get("lock"):
+                return MarkStepResult(log_entry.scan_index, log_entry.action, "skipped_not_marked")
+            self._run_macro("lock")
+            time.sleep(0.25)
+            return MarkStepResult(log_entry.scan_index, log_entry.action, "unmarked")
+
+        return MarkStepResult(
+            log_entry.scan_index,
+            log_entry.action,
+            "error",
+            f"未知动作: {log_entry.action}",
+        )
 
     def _connect(self) -> None:
         if self.scanner is None:
@@ -176,7 +331,8 @@ class MarkingExecutor:
             self.session.cols,
         )
         self.scanner._apply_moves(moves, pace="marking")
-        time.sleep(0.2)
+        extra = min(0.35, len(moves) * 0.003)
+        self._wait_panel_settle(extra)
 
     def _matches_first_cell(self, sct, entry) -> bool:
         if entry is None:
@@ -197,26 +353,13 @@ class MarkingExecutor:
         )
         if entry is None:
             return
-        image_bgr = self._capture_bgr(sct)
         try:
-            self._verify_entry_at_current_cell(image_bgr, entry)
+            self._verify_entry_with_retry(sct, entry)
         except InventoryChangedError as exc:
             raise InventoryChangedError(
                 f"自动归位后第 1 格校验失败（{exc}）。"
                 "请确认在仓库页面且背包与扫描会话一致。"
             ) from exc
-
-    def _already_marked(self, image_bgr: np.ndarray, action: str) -> bool:
-        states = self.detector.detect_from_bgr(image_bgr)
-        marked = bool(states.get(action))
-        logger.debug(
-            f"标记状态检测 action={action} marked={marked} "
-            f"discard={float(states.get('discard_marked_score', 0.0)):.3f}/"
-            f"{float(states.get('discard_unmarked_score', 0.0)):.3f} "
-            f"lock={float(states.get('lock_marked_score', 0.0)):.3f}/"
-            f"{float(states.get('lock_unmarked_score', 0.0)):.3f}"
-        )
-        return marked
 
     def execute_targets(
         self,
@@ -245,25 +388,14 @@ class MarkingExecutor:
                     continue
                 self._navigate_between(current_index, target.scan_index)
                 current_index = target.scan_index
-                time.sleep(0.35)
-                image_bgr = self._capture_bgr(sct)
                 try:
-                    self._verify_entry_at_current_cell(image_bgr, entry)
+                    result = self._execute_mark_action(sct, target, entry)
                 except InventoryChangedError as exc:
                     result = MarkStepResult(target.scan_index, target.action, "aborted", str(exc))
                     results.append(result)
                     if on_progress:
                         on_progress(idx, total, result)
                     raise
-                if self._already_marked(image_bgr, target.action):
-                    result = MarkStepResult(target.scan_index, target.action, "skipped_already_marked")
-                    results.append(result)
-                    if on_progress:
-                        on_progress(idx, total, result)
-                    continue
-                self._run_macro(target.action)
-                time.sleep(0.25)
-                result = MarkStepResult(target.scan_index, target.action, "marked")
                 results.append(result)
                 if on_progress:
                     on_progress(idx, total, result)
@@ -292,18 +424,14 @@ class MarkingExecutor:
                     continue
                 self._navigate_between(current_index, entry.scan_index)
                 current_index = entry.scan_index
-                time.sleep(0.35)
-                image_bgr = self._capture_bgr(sct)
-                self._verify_entry_at_current_cell(image_bgr, session_entry)
-                if not self._already_marked(image_bgr, entry.action):
-                    result = MarkStepResult(entry.scan_index, entry.action, "skipped_not_marked")
+                try:
+                    result = self._rollback_log_entry(sct, entry, session_entry)
+                except InventoryChangedError as exc:
+                    result = MarkStepResult(entry.scan_index, entry.action, "aborted", str(exc))
                     results.append(result)
                     if on_progress:
                         on_progress(idx, total, result)
-                    continue
-                self._run_macro(entry.action)
-                time.sleep(0.25)
-                result = MarkStepResult(entry.scan_index, entry.action, "unmarked")
+                    raise
                 results.append(result)
                 if on_progress:
                     on_progress(idx, total, result)

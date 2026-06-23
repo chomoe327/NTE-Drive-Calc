@@ -15,8 +15,8 @@ from src.utils.logger import logger
 
 BASE_DISCARD_ROI = (2055, 330, 2145, 420)
 BASE_LOCK_ROI = (2265, 330, 2355, 420)
-DEFAULT_THRESHOLD = 0.78
-RELATIVE_MARGIN = 0.05
+DEFAULT_THRESHOLD = 0.72
+RELATIVE_MARGIN = 0.04
 
 
 class MarkStateDetector:

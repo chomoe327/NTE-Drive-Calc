@@ -444,7 +444,7 @@ class MarkingExecutorTest(unittest.TestCase):
     @patch("src.features.discard.executor.GamepadScanner")
     @patch("src.features.discard.executor.vg", create=True)
     def test_navigates_targets_in_scan_order(self, _vg, scanner_cls, _mss, _batch):
-        from src.features.discard.executor import MarkingExecutor
+        from src.features.discard.executor import MarkingExecutor, MarkStepResult
 
         session = ScanSession(
             session_id="s",
@@ -466,8 +466,13 @@ class MarkingExecutorTest(unittest.TestCase):
             config_dir=Path("config"),
         )
         executor.detector.detect_from_bgr = MagicMock(return_value={"discard": False, "lock": False})
-        executor._verify_current_drive = MagicMock()
-        executor._capture_bgr = MagicMock(return_value=MagicMock(shape=(100, 100, 3)))
+        executor._verify_entry_with_retry = MagicMock(return_value=MagicMock(shape=(100, 100, 3)))
+        executor._detect_mark_states = MagicMock(return_value={"discard": False, "lock": False})
+        executor._execute_mark_action = MagicMock(
+            side_effect=lambda sct, target, entry: MarkStepResult(
+                target.scan_index, target.action, "marked"
+            )
+        )
         targets = [
             MarkTarget(3, "u3", "drive", "Gold", "C", None, "discard"),
             MarkTarget(8, "u8", "drive", "Gold", "C", None, "lock"),
@@ -479,6 +484,121 @@ class MarkingExecutorTest(unittest.TestCase):
         moves = [call.args[0] for call in scanner._apply_moves.call_args_list]
         self.assertEqual(moves[0], moves_between_scan_indices(1, 3, 12))
         self.assertEqual(moves[1], moves_between_scan_indices(3, 8, 12))
+
+    @patch("src.features.discard.executor.BatchProcessor")
+    @patch("src.features.discard.executor.mss.mss")
+    @patch("src.features.discard.executor.GamepadScanner")
+    @patch("src.features.discard.executor.vg", create=True)
+    def test_discard_unlocks_before_marking(self, _vg, scanner_cls, _mss, _batch):
+        from src.features.discard.executor import MarkingExecutor, MarkStepResult
+
+        session = ScanSession(
+            session_id="s",
+            created_at="t",
+            total_drives=1,
+            cols=7,
+            entries=[ScanSessionEntry(1, "a", "Gold", "drive", "sig", None)],
+        )
+        scanner = MagicMock()
+        scanner.wait_for_handoff = MagicMock()
+        scanner.anchor_to_first_cell = MagicMock()
+        scanner_cls.return_value = scanner
+        executor = MarkingExecutor(
+            session,
+            template_dir=Path("config/templates/marking"),
+            config_dir=Path("config"),
+        )
+        executor._verify_entry_with_retry = MagicMock(return_value=MagicMock(shape=(100, 100, 3)))
+        executor._detect_mark_states = MagicMock(
+            side_effect=[
+                {"discard": False, "lock": True},
+                {"discard": False, "lock": False},
+                {"discard": False, "lock": False},
+            ]
+        )
+        executor._run_macro = MagicMock()
+        executor._capture_bgr = MagicMock(return_value=MagicMock(shape=(100, 100, 3)))
+        target = MarkTarget(1, "a", "drive", "Gold", "C", None, "discard")
+        result = executor._execute_mark_action(MagicMock(), target, session.entries[0])
+        self.assertEqual(result.status, "marked")
+        self.assertTrue(result.was_locked_before)
+        executor._run_macro.assert_any_call("lock")
+        executor._run_macro.assert_any_call("discard")
+
+    @patch("src.features.discard.executor.BatchProcessor")
+    @patch("src.features.discard.executor.mss.mss")
+    @patch("src.features.discard.executor.GamepadScanner")
+    @patch("src.features.discard.executor.vg", create=True)
+    def test_rollback_discard_restores_lock(self, _vg, scanner_cls, _mss, _batch):
+        from src.features.discard.executor import MarkingExecutor
+        from src.features.discard.log_store import MarkLogEntry
+
+        session = ScanSession(
+            session_id="s",
+            created_at="t",
+            total_drives=1,
+            cols=7,
+            entries=[ScanSessionEntry(1, "a", "Gold", "drive", "sig", None)],
+        )
+        scanner = MagicMock()
+        scanner.wait_for_handoff = MagicMock()
+        scanner.anchor_to_first_cell = MagicMock()
+        scanner_cls.return_value = scanner
+        executor = MarkingExecutor(
+            session,
+            template_dir=Path("config/templates/marking"),
+            config_dir=Path("config"),
+        )
+        executor._verify_entry_with_retry = MagicMock(return_value=MagicMock(shape=(100, 100, 3)))
+        executor._detect_mark_states = MagicMock(
+            side_effect=[
+                {"discard": True, "lock": False},
+                {"discard": False, "lock": False},
+            ]
+        )
+        executor._run_macro = MagicMock()
+        executor._capture_bgr = MagicMock(return_value=MagicMock(shape=(100, 100, 3)))
+        log_entry = MarkLogEntry(1, "a", "discard", "marked", "t1", was_locked_before=True)
+        result = executor._rollback_log_entry(MagicMock(), log_entry, session.entries[0])
+        self.assertEqual(result.status, "unmarked")
+        self.assertTrue(result.was_locked_before)
+        executor._run_macro.assert_any_call("discard")
+        executor._run_macro.assert_any_call("lock")
+
+    def test_log_entry_roundtrip_was_locked_before(self):
+        entry = MarkLogEntry(1, "a", "discard", "marked", "t1", was_locked_before=True)
+        restored = MarkLogSession.from_dict(
+            {
+                "id": "s1",
+                "scan_session_id": "snap",
+                "created_at": "t0",
+                "rules": {},
+                "roles": [],
+                "entries": [entry.to_dict()],
+            }
+        ).entries[0]
+        self.assertTrue(restored.was_locked_before)
+
+    def test_log_entry_defaults_was_locked_before_false(self):
+        restored = MarkLogSession.from_dict(
+            {
+                "id": "s1",
+                "scan_session_id": "snap",
+                "created_at": "t0",
+                "rules": {},
+                "roles": [],
+                "entries": [
+                    {
+                        "scan_index": 1,
+                        "uid": "a",
+                        "action": "discard",
+                        "status": "marked",
+                        "marked_at": "t1",
+                    }
+                ],
+            }
+        ).entries[0]
+        self.assertFalse(restored.was_locked_before)
 
     @patch("src.features.discard.executor.BatchProcessor")
     @patch("src.features.discard.executor.mss.mss")
@@ -506,7 +626,8 @@ class MarkingExecutorTest(unittest.TestCase):
             config_dir=Path("config"),
         )
         executor.detector.detect_from_bgr = MagicMock(return_value={"discard": True, "lock": False})
-        executor._verify_current_drive = MagicMock()
+        executor._verify_entry_with_retry = MagicMock(return_value=MagicMock(shape=(100, 100, 3)))
+        executor._detect_mark_states = MagicMock(return_value={"discard": True, "lock": False})
         executor._capture_bgr = MagicMock(return_value=MagicMock(shape=(100, 100, 3)))
         targets = [
             MarkTarget(1, "a", "drive", "Gold", "C", None, "discard"),

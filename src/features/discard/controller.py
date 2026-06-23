@@ -426,6 +426,7 @@ def _marking_on_execute_done(self, results):
                     marked_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
                     if result.status == "marked"
                     else None,
+                    was_locked_before=bool(result.was_locked_before),
                 )
             )
     MarkLogStore(paths["log"]).append_session(session)

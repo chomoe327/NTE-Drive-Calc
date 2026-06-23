@@ -20,6 +20,7 @@ class MarkLogEntry:
     action: str
     status: EntryStatus
     marked_at: str | None = None
+    was_locked_before: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -46,7 +47,18 @@ class MarkLogSession:
 
     @classmethod
     def from_dict(cls, data: dict) -> MarkLogSession:
-        entries = [MarkLogEntry(**entry) for entry in data.get("entries", []) if isinstance(entry, dict)]
+        entries = [
+            MarkLogEntry(
+                scan_index=int(entry["scan_index"]),
+                uid=str(entry.get("uid") or ""),
+                action=str(entry.get("action") or ""),
+                status=entry.get("status", "marked"),  # type: ignore[arg-type]
+                marked_at=entry.get("marked_at"),
+                was_locked_before=bool(entry.get("was_locked_before", False)),
+            )
+            for entry in data.get("entries", [])
+            if isinstance(entry, dict)
+        ]
         return cls(
             id=str(data.get("id") or uuid.uuid4()),
             scan_session_id=str(data.get("scan_session_id") or ""),

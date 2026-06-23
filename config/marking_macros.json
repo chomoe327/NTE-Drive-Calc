@@ -1,8 +1,11 @@
 {
   "discard": [
-    {"button": "DPAD_LEFT", "hold_ms": 80, "after_ms": 200}
+    {"button": "DPAD_LEFT", "hold_ms": 80, "after_ms": 250}
   ],
   "lock": [
-    {"button": "DPAD_RIGHT", "hold_ms": 80, "after_ms": 200}
+    {"button": "DPAD_RIGHT", "hold_ms": 80, "after_ms": 250}
+  ],
+  "confirm": [
+    {"button": "A", "hold_ms": 80, "after_ms": 300}
   ]
 }
