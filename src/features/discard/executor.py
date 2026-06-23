@@ -211,6 +211,7 @@ class MarkingExecutor:
         if target.action == "discard":
             states = self._detect_mark_states(image_bgr, target.scan_index)
             if states.get("discard"):
+                logger.info(f"第 {target.scan_index} 格已处于弃置状态，跳过")
                 return MarkStepResult(target.scan_index, target.action, "skipped_already_marked")
             if self.ignore_locked and states.get("lock"):
                 logger.info(f"第 {target.scan_index} 格已上锁，忽略弃置")
@@ -218,11 +219,13 @@ class MarkingExecutor:
             image_bgr, was_locked_before = self._ensure_unlocked_for_discard(sct, image_bgr, target.scan_index)
             states = self._detect_mark_states(image_bgr, target.scan_index)
             if states.get("discard"):
+                logger.info(f"第 {target.scan_index} 格解锁后已处于弃置状态，跳过")
                 return MarkStepResult(target.scan_index, target.action, "skipped_already_marked")
             self._run_macro("discard")
         elif target.action == "lock":
             states = self._detect_mark_states(image_bgr, target.scan_index)
             if states.get("lock"):
+                logger.info(f"第 {target.scan_index} 格已处于上锁状态，跳过")
                 return MarkStepResult(target.scan_index, target.action, "skipped_already_marked")
             self._run_macro("lock")
         else:

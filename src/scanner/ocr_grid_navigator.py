@@ -165,6 +165,9 @@ class OcrGridNavigator:
                 )
                 self.scanner.apply_moves_batch(moves)
                 self._wait_panel_settle()
+            else:
+                # 起始格已在目标上时不会移动，仍需等待详情面板稳定后再校验/判态。
+                self._wait_panel_settle()
 
             if self._verify_target_signature(sct, target_index):
                 return self._position_for_index(target_index)
