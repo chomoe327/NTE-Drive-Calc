@@ -179,12 +179,14 @@ class MarkingExecutor:
         states = self.detector.detect_from_bgr(image_bgr)
         logger.info(
             f"第 {scan_index} 格标记状态 "
-            f"discard contrast={float(states.get('discard_contrast', 0.0)):.1f}/"
-            f"{float(states.get('discard_contrast_mid', 0.0)):.1f} "
+            f"discard bright={float(states.get('discard_brightness', 0.0)):.1f}/"
+            f"{float(states.get('discard_brightness_mid', 0.0)):.1f} "
+            f"loc={float(states.get('discard_locate_score', 0.0)):.3f} "
             f"tm={float(states.get('discard_marked_score', 0.0)):.3f}/"
             f"{float(states.get('discard_unmarked_score', 0.0)):.3f} "
-            f"lock contrast={float(states.get('lock_contrast', 0.0)):.1f}/"
-            f"{float(states.get('lock_contrast_mid', 0.0)):.1f} "
+            f"lock bright={float(states.get('lock_brightness', 0.0)):.1f}/"
+            f"{float(states.get('lock_brightness_mid', 0.0)):.1f} "
+            f"loc={float(states.get('lock_locate_score', 0.0)):.3f} "
             f"tm={float(states.get('lock_marked_score', 0.0)):.3f}/"
             f"{float(states.get('lock_unmarked_score', 0.0)):.3f} "
             f"=> discard={bool(states.get('discard'))} lock={bool(states.get('lock'))}"

@@ -492,14 +492,15 @@ class MarkStateDetectorTest(unittest.TestCase):
         self.assertIsNotNone(marked)
         self.assertIsNotNone(unmarked)
         canvas = self._roi_canvas(marked)
-        is_marked, marked_score, unmarked_score, contrast, mid = detector._pair_state(
+        is_marked, marked_score, unmarked_score, brightness, mid, locate = detector._pair_state(
             canvas,
             "discard_marked",
             "discard_unmarked",
         )
         self.assertTrue(is_marked)
         self.assertGreater(marked_score, unmarked_score)
-        self.assertGreaterEqual(contrast, mid)
+        self.assertGreaterEqual(brightness, mid)
+        self.assertGreaterEqual(locate, 0.1)
 
     def test_detect_prefers_unmarked_template(self):
         from src.features.discard.mark_state import MarkStateDetector
@@ -511,13 +512,13 @@ class MarkStateDetectorTest(unittest.TestCase):
         unmarked = detector._templates.get("discard_unmarked")
         self.assertIsNotNone(unmarked)
         canvas = self._roi_canvas(unmarked)
-        is_marked, _, _, contrast, mid = detector._pair_state(
+        is_marked, _, _, brightness, mid, _ = detector._pair_state(
             canvas,
             "discard_marked",
             "discard_unmarked",
         )
         self.assertFalse(is_marked)
-        self.assertLess(contrast, mid)
+        self.assertLess(brightness, mid)
 
     def test_detect_low_margin_discarded_state(self):
         from src.features.discard.mark_state import MarkStateDetector
@@ -534,12 +535,12 @@ class MarkStateDetectorTest(unittest.TestCase):
             unmarked = cv2.resize(unmarked, (marked.shape[1], marked.shape[0]))
         blended = cv2.addWeighted(marked, 0.55, unmarked, 0.45, 0)
         canvas = self._roi_canvas(blended)
-        is_marked, marked_score, unmarked_score, contrast, mid = detector._pair_state(
+        is_marked, marked_score, unmarked_score, brightness, mid, _ = detector._pair_state(
             canvas,
             "discard_marked",
             "discard_unmarked",
         )
-        self.assertTrue(is_marked, f"contrast={contrast:.1f} mid={mid:.1f} tm={marked_score:.3f}/{unmarked_score:.3f}")
+        self.assertTrue(is_marked, f"bright={brightness:.1f} mid={mid:.1f} tm={marked_score:.3f}/{unmarked_score:.3f}")
 
     def test_detect_prefers_lock_marked_template(self):
         from src.features.discard.mark_state import MarkStateDetector
@@ -551,14 +552,14 @@ class MarkStateDetectorTest(unittest.TestCase):
         marked = detector._templates.get("lock_marked")
         self.assertIsNotNone(marked)
         canvas = self._roi_canvas(marked)
-        is_marked, marked_score, unmarked_score, contrast, mid = detector._pair_state(
+        is_marked, marked_score, unmarked_score, brightness, mid, _ = detector._pair_state(
             canvas,
             "lock_marked",
             "lock_unmarked",
         )
         self.assertTrue(is_marked)
         self.assertGreater(marked_score, unmarked_score)
-        self.assertGreaterEqual(contrast, mid)
+        self.assertGreaterEqual(brightness, mid)
 
     def test_detect_prefers_lock_unmarked_template(self):
         from src.features.discard.mark_state import MarkStateDetector
@@ -570,13 +571,13 @@ class MarkStateDetectorTest(unittest.TestCase):
         unmarked = detector._templates.get("lock_unmarked")
         self.assertIsNotNone(unmarked)
         canvas = self._roi_canvas(unmarked)
-        is_marked, _, _, contrast, mid = detector._pair_state(
+        is_marked, _, _, brightness, mid, _ = detector._pair_state(
             canvas,
             "lock_marked",
             "lock_unmarked",
         )
         self.assertFalse(is_marked)
-        self.assertLess(contrast, mid)
+        self.assertLess(brightness, mid)
 
 
 class MarkingExecutorButtonTest(unittest.TestCase):
