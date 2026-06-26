@@ -355,14 +355,75 @@ def _build_plan_diff_dialog(self, role_name, diff):
         added_tape=[it for it in added if it.get("type")=="tape"]
         added_drives=[it for it in added if it.get("type")!="tape"]
 
-        # Pair drives by position (count usually equal, shapes may differ due to blueprint changes)
+        # Pair drives by shape family: exact shape_id match first, then same-type+area match.
+        _SHAPE_FAMILY = {
+            "H_2": "I_2", "V_2": "I_2",
+            "H_3": "I_3", "V_3": "I_3",
+            "H_4": "I_4", "V_4": "I_4",
+            "L_3_TL": "L_3", "L_3_TR": "L_3", "L_3_BL": "L_3", "L_3_BR": "L_3",
+            "Trap_4_H": "Trap_4", "Trap_4_V": "Trap_4",
+        }
+        def _shape_family(sid: str) -> str:
+            """Return a family key for same-shape-class matching. Unknown shapes map to themselves."""
+            return _SHAPE_FAMILY.get(sid, sid)
+
         def _match_pairs(old_list, new_list):
-            pairs=[]
-            for i in range(min(len(old_list),len(new_list))):
-                pairs.append((old_list[i],new_list[i]))
-            unmatched_old=old_list[len(new_list):] if len(old_list)>len(new_list) else []
-            unmatched_new=new_list[len(old_list):] if len(new_list)>len(old_list) else []
-            return pairs,unmatched_old,unmatched_new
+            """Two-tier pairing: exact shape_id first, then same-type+area family.
+            Leftover items with no counterpart become unmatched."""
+            # --- first pass: exact shape_id ---
+            old_by_shape: dict[str, list] = {}
+            for item in old_list:
+                sid = str(item.get("shape_id", "") or "")
+                old_by_shape.setdefault(sid, []).append(item)
+            new_by_shape: dict[str, list] = {}
+            for item in new_list:
+                sid = str(item.get("shape_id", "") or "")
+                new_by_shape.setdefault(sid, []).append(item)
+
+            pairs = []
+            all_exact_shapes = set(old_by_shape) | set(new_by_shape)
+            for sid in sorted(all_exact_shapes):
+                old_items = old_by_shape.get(sid, [])
+                new_items = new_by_shape.get(sid, [])
+                n = min(len(old_items), len(new_items))
+                for i in range(n):
+                    pairs.append((old_items[i], new_items[i]))
+                # replace with leftovers
+                old_by_shape[sid] = old_items[n:]
+                new_by_shape[sid] = new_items[n:]
+
+            # --- second pass: match leftovers by shape family ---
+            # collect leftover items grouped by family
+            old_left: list = []
+            for items in old_by_shape.values():
+                old_left.extend(items)
+            new_left: list = []
+            for items in new_by_shape.values():
+                new_left.extend(items)
+
+            old_by_family: dict[str, list] = {}
+            for item in old_left:
+                fam = _shape_family(str(item.get("shape_id", "") or ""))
+                old_by_family.setdefault(fam, []).append(item)
+            new_by_family: dict[str, list] = {}
+            for item in new_left:
+                fam = _shape_family(str(item.get("shape_id", "") or ""))
+                new_by_family.setdefault(fam, []).append(item)
+
+            unmatched_old = []
+            unmatched_new = []
+
+            all_families = set(old_by_family) | set(new_by_family)
+            for fam in sorted(all_families):
+                old_items = old_by_family.get(fam, [])
+                new_items = new_by_family.get(fam, [])
+                n = min(len(old_items), len(new_items))
+                for i in range(n):
+                    pairs.append((old_items[i], new_items[i]))
+                unmatched_old.extend(old_items[n:])
+                unmatched_new.extend(new_items[n:])
+
+            return pairs, unmatched_old, unmatched_new
 
         pair_index=0
 

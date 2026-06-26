@@ -1263,7 +1263,7 @@ class ExecutePageWorkflowTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(["H_2"], window.card_labels)
+        self.assertEqual(["H_2", "V_2"], window.card_labels)
         self.assertIn("配装变动", dialog.windowTitle())
         app.processEvents()
 
