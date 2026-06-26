@@ -38,7 +38,6 @@ __all__ = [
     "_marking_set_rules_to_ui",
     "_marking_load_inventory",
     "_marking_start_full_scan",
-    "_marking_on_pipeline_scan_done",
     "_marking_on_pipeline_vision_done",
     "_marking_on_pipeline_error",
     "_marking_calculate",
@@ -226,37 +225,26 @@ def _marking_start_full_scan(self):
     self._marking_pipeline = True
     self._replace_inventory_on_next_parse = True
     self._pending_scan_mode = "gamepad"
+    self._pending_parse_scope = "full"
+    self._pending_delete_after_parse = []
+    self._pending_probe_duplicate_count = 0
     QMessageBox.information(
         self,
         "全量扫描准备",
         "点击 OK 后程序会最小化并开始全量扫描。\n\n"
-        "请切换至游戏的驱动/卡带仓库页面，并确保已选中第一格（第一排第一个驱动/卡带）。",
+        "请切换至游戏的驱动/卡带仓库页面，并确保已选中第一格（第一排第一个驱动/卡带）。\n"
+        "程序会在短暂倒计时后接管虚拟手柄，边截图边解析。",
     )
     self.showMinimized()
-    from src.app.workers import GamepadScanWorkerThread
+    from src.app.workers import GamepadScanParseWorkerThread
 
-    self._gamepad_worker = GamepadScanWorkerThread(total_drives=total_drives, parent=self)
-    self._gamepad_worker.scan_done.connect(self._marking_on_pipeline_scan_done)
-    self._gamepad_worker.error.connect(self._marking_on_pipeline_error)
+    self._gamepad_worker = GamepadScanParseWorkerThread(total_drives=total_drives, parent=self)
+    self._gamepad_worker.processing_done.connect(self._on_gamepad_pipeline_done)
+    self._gamepad_worker.error.connect(self._on_gamepad_error)
     self._register_scan_hotkeys("gamepad")
     self.marking_start_scan_btn.setEnabled(False)
-    self.marking_start_scan_btn.setText("扫描中... (F12 停止)")
+    self.marking_start_scan_btn.setText("扫描/解析中... (F12 停止)")
     self._gamepad_worker.start()
-
-
-def _marking_on_pipeline_scan_done(self, count):
-    if not getattr(self, "_marking_pipeline", False):
-        return
-    if count <= 0:
-        self._marking_pipeline = False
-        self._unregister_scan_hotkeys()
-        self.showNormal()
-        self.activateWindow()
-        self.marking_start_scan_btn.setEnabled(True)
-        self.marking_start_scan_btn.setText("开始全量扫描")
-        QMessageBox.information(self, "扫描完成", "未捕获到新装备，无需解析。")
-        return
-    self._on_scan_done(count)
 
 
 def _marking_on_pipeline_vision_done(self, stats):
