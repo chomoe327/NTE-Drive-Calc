@@ -335,21 +335,126 @@ def _diff_item_card(self, role_name, item, is_new=False):
 def _build_plan_diff_dialog(self, role_name, diff):
     dlg=QDialog(self if isinstance(self, QWidget) else None)
     dlg.setWindowTitle(f"{role_name} - 配装变动")
-    dlg.setMinimumSize(760,520)
+    dlg.setMinimumSize(820,560)
     dlg.setStyleSheet(STYLE)
     layout=QVBoxLayout(dlg); layout.setContentsMargins(14,14,14,14); layout.setSpacing(10)
     scroll=QScrollArea(); scroll.setWidgetResizable(True)
-    body=QWidget(); body_layout=QVBoxLayout(body); body_layout.setContentsMargins(0,0,0,0); body_layout.setSpacing(8)
+    body=QWidget(); body_layout=QVBoxLayout(body); body_layout.setContentsMargins(0,0,0,0); body_layout.setSpacing(10)
     section_label=getattr(self, "_section_label", None) or (lambda text: _section_label(self, text))
     diff_item_card=getattr(self, "_diff_item_card", None) or (lambda role, item, is_new=False: _diff_item_card(self, role, item, is_new))
+
     removed=diff.get("removed",[]) or []
     added=diff.get("added",[]) or []
-    if removed:
-        body_layout.addWidget(section_label("卸下装备"))
-        for item in removed:
-            body_layout.addWidget(diff_item_card(role_name,item,is_new=False))
+
+    if not removed and not added:
+        body_layout.addWidget(QLabel("本次配装与已保存方案没有装备变动。"))
     else:
-        body_layout.addWidget(QLabel("本次没有卸下装备。"))
+        # Separate tapes and drives in both removed and added
+        removed_tape=[it for it in removed if it.get("type")=="tape"]
+        removed_drives=[it for it in removed if it.get("type")!="tape"]
+        added_tape=[it for it in added if it.get("type")=="tape"]
+        added_drives=[it for it in added if it.get("type")!="tape"]
+
+        # Helper: match drives by shape_id, then sequentially for unmatched
+        def _match_pairs(old_list, new_list):
+            old_remain=list(old_list)
+            new_remain=list(new_list)
+            pairs=[]
+            # First pass: match by shape_id
+            for o in old_list:
+                o_sid=o.get("shape_id","")
+                if not o_sid:
+                    continue
+                for n in new_remain:
+                    if n.get("shape_id")==o_sid:
+                        pairs.append((o,n))
+                        old_remain.remove(o)
+                        new_remain.remove(n)
+                        break
+            # Second pass: match remaining sequentially
+            for i in range(min(len(old_remain),len(new_remain))):
+                pairs.append((old_remain[i],new_remain[i]))
+            unmatched_old=old_remain[len(new_remain):] if len(old_remain)>len(new_remain) else []
+            unmatched_new=new_remain[len(old_remain):] if len(new_remain)>len(old_remain) else []
+            return pairs,unmatched_old,unmatched_new
+
+        pair_index=0
+
+        # Tape comparison
+        if removed_tape or added_tape:
+            pair_index+=1
+            body_layout.addWidget(section_label(f"变动 {pair_index}：卡带"))
+            pair_frame=QFrame()
+            pair_frame.setStyleSheet("QFrame{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:8px 10px}")
+            pair_layout=QVBoxLayout(pair_frame); pair_layout.setSpacing(6); pair_layout.setContentsMargins(8,6,8,6)
+
+            # Old tape
+            old_lbl=QLabel("← 卸下（旧）")
+            old_lbl.setStyleSheet("font-size:11px;font-weight:700;color:#f85149;border:none;background:transparent;padding:2px 4px")
+            pair_layout.addWidget(old_lbl)
+            if removed_tape:
+                pair_layout.addWidget(diff_item_card(role_name,removed_tape[0],is_new=False))
+            else:
+                pair_layout.addWidget(QLabel("  （无需卸下）"))
+
+            # Arrow
+            arrow=QLabel("  ↓")
+            arrow.setStyleSheet("font-size:18px;font-weight:700;color:#58a6ff;border:none;background:transparent;padding:0 0 0 12px")
+            pair_layout.addWidget(arrow)
+
+            # New tape
+            new_lbl=QLabel("→ 换上（新）")
+            new_lbl.setStyleSheet("font-size:11px;font-weight:700;color:#56d364;border:none;background:transparent;padding:2px 4px")
+            pair_layout.addWidget(new_lbl)
+            if added_tape:
+                pair_layout.addWidget(diff_item_card(role_name,added_tape[0],is_new=True))
+            else:
+                pair_layout.addWidget(QLabel("  （无需换上）"))
+
+            body_layout.addWidget(pair_frame)
+
+        # Drive comparisons
+        drive_pairs,unmatched_old,unmatched_new=_match_pairs(removed_drives,added_drives)
+
+        for old_d,new_d in drive_pairs:
+            pair_index+=1
+            old_sid=old_d.get("shape_id","未知驱动")
+            new_sid=new_d.get("shape_id","未知驱动")
+            title=f"变动 {pair_index}：{old_sid} → {new_sid}" if old_sid!=new_sid else f"变动 {pair_index}：{old_sid}"
+            body_layout.addWidget(section_label(title))
+
+            pair_frame=QFrame()
+            pair_frame.setStyleSheet("QFrame{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:8px 10px}")
+            pair_layout=QVBoxLayout(pair_frame); pair_layout.setSpacing(6); pair_layout.setContentsMargins(8,6,8,6)
+
+            old_lbl=QLabel("← 卸下（旧）")
+            old_lbl.setStyleSheet("font-size:11px;font-weight:700;color:#f85149;border:none;background:transparent;padding:2px 4px")
+            pair_layout.addWidget(old_lbl)
+            pair_layout.addWidget(diff_item_card(role_name,old_d,is_new=False))
+
+            arrow=QLabel("  ↓")
+            arrow.setStyleSheet("font-size:18px;font-weight:700;color:#58a6ff;border:none;background:transparent;padding:0 0 0 12px")
+            pair_layout.addWidget(arrow)
+
+            new_lbl=QLabel("→ 换上（新）")
+            new_lbl.setStyleSheet("font-size:11px;font-weight:700;color:#56d364;border:none;background:transparent;padding:2px 4px")
+            pair_layout.addWidget(new_lbl)
+            pair_layout.addWidget(diff_item_card(role_name,new_d,is_new=True))
+
+            body_layout.addWidget(pair_frame)
+
+        # Unmatched old drives (removed only, no replacement)
+        for old_d in unmatched_old:
+            pair_index+=1
+            body_layout.addWidget(section_label(f"变动 {pair_index}：卸下 {old_d.get('shape_id','未知驱动')}"))
+            body_layout.addWidget(diff_item_card(role_name,old_d,is_new=False))
+
+        # Unmatched new drives (added only, no old counterpart)
+        for new_d in unmatched_new:
+            pair_index+=1
+            body_layout.addWidget(section_label(f"变动 {pair_index}：新增 {new_d.get('shape_id','未知驱动')}"))
+            body_layout.addWidget(diff_item_card(role_name,new_d,is_new=True))
+
     body_layout.addStretch()
     scroll.setWidget(body)
     layout.addWidget(scroll,1)
