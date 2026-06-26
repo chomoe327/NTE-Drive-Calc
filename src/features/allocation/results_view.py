@@ -355,27 +355,13 @@ def _build_plan_diff_dialog(self, role_name, diff):
         added_tape=[it for it in added if it.get("type")=="tape"]
         added_drives=[it for it in added if it.get("type")!="tape"]
 
-        # Helper: match drives by shape_id, then sequentially for unmatched
+        # Pair drives by position (count usually equal, shapes may differ due to blueprint changes)
         def _match_pairs(old_list, new_list):
-            old_remain=list(old_list)
-            new_remain=list(new_list)
             pairs=[]
-            # First pass: match by shape_id
-            for o in old_list:
-                o_sid=o.get("shape_id","")
-                if not o_sid:
-                    continue
-                for n in new_remain:
-                    if n.get("shape_id")==o_sid:
-                        pairs.append((o,n))
-                        old_remain.remove(o)
-                        new_remain.remove(n)
-                        break
-            # Second pass: match remaining sequentially
-            for i in range(min(len(old_remain),len(new_remain))):
-                pairs.append((old_remain[i],new_remain[i]))
-            unmatched_old=old_remain[len(new_remain):] if len(old_remain)>len(new_remain) else []
-            unmatched_new=new_remain[len(old_remain):] if len(new_remain)>len(old_remain) else []
+            for i in range(min(len(old_list),len(new_list))):
+                pairs.append((old_list[i],new_list[i]))
+            unmatched_old=old_list[len(new_list):] if len(old_list)>len(new_list) else []
+            unmatched_new=new_list[len(old_list):] if len(new_list)>len(old_list) else []
             return pairs,unmatched_old,unmatched_new
 
         pair_index=0
