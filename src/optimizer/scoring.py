@@ -5,6 +5,7 @@ import json
 import os
 from typing import List, Dict, Any
 
+from src.domain.grade_limits import meets_min_grade
 from src.domain.stat_catalog import StatCatalog
 from src.utils.logger import logger
 from src.models.equipment import BaseEquipment, Drive, Tape
@@ -101,10 +102,20 @@ class ScoringEngine:
         names = [str(name).replace("%", "") for name in (getattr(item, "sub_stats", {}) or {}).keys()]
         return any(target == name or target in name or name in target for name in names)
 
+    def _meets_grade_limit(self, role: str, item: BaseEquipment, config: dict | None) -> bool:
+        score = getattr(item, "role_scores", {}).get(role, 0.0)
+        area = getattr(item, "area", 1) or 1
+        if isinstance(config, dict) and config.get("ignore_grade_limit"):
+            return True
+        min_grade = "A"
+        if isinstance(config, dict):
+            min_grade = str(config.get("min_grade_limit") or "A")
+        return meets_min_grade(score, area, min_grade)
+
     def _priority_rank_for_item(self, role: str, item: BaseEquipment, config: dict | None) -> tuple[int, int]:
         if not isinstance(config, dict):
             return (0, 0)
-        if not config.get("ignore_grade_limit") and not self._is_a_grade_item(role, item):
+        if not self._meets_grade_limit(role, item, config):
             return (0, 0)
         stats = [str(stat) for stat in config.get("stats", []) if stat]
         if not stats:

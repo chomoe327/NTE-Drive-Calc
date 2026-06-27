@@ -17,7 +17,7 @@ from src.ui.puzzle_board import PuzzleBoardWidget, get_shape_pixmap as _get_shap
 
 from src.ui.main_window_method_install import install_methods as _install_main_window_methods
 
-__all__ = ['_section_label', '_render_results', '_calc_grade', '_show_plan_diff_dialog', '_build_plan_diff_dialog', '_diff_item_card', '_diff_item_score_info', '_plan_diff_text', '_stat_w', '_stat_c', '_weighted_score', '_quality_coef', '_canonical_stat_name', '_stat_number_value', '_item_value', '_add_stat_total', '_fallback_tape_main_value', '_extra_shape_area', '_equipment_bonus_rows', '_format_bonus_value', '_bonus_summary_widget', '_bonus_row_widget', '_show_bonus_summary_dialog', '_score_drive_dict', '_score_tape_dict', '_equip_card']
+__all__ = ['_section_label', '_render_results', '_calc_grade', '_show_plan_diff_dialog', '_build_plan_diff_dialog', '_diff_item_card', '_diff_item_score_info', '_plan_diff_text', '_stat_w', '_stat_c', '_weighted_score', '_quality_coef', '_canonical_stat_name', '_stat_number_value', '_item_value', '_add_stat_total', '_fallback_tape_main_value', '_extra_shape_area', '_equipment_bonus_rows', '_format_bonus_value', '_bonus_summary_widget', '_bonus_row_widget', '_bonus_comparison_widget', '_show_bonus_summary_dialog', '_score_drive_dict', '_score_tape_dict', '_equip_card']
 
 
 def install_methods(app_module, window_cls):
@@ -332,16 +332,38 @@ def _diff_item_card(self, role_name, item, is_new=False):
         is_new=is_new,
     )
 
+def _split_loadout_sources(sources):
+    tape=None
+    drives=[]
+    for item in sources or []:
+        if not item:
+            continue
+        item_type=str(item.get("type") if isinstance(item,dict) else getattr(item,"type","") or "")
+        if item_type=="tape" or (isinstance(item,dict) and item.get("main_stats") and not item.get("shape_id")):
+            tape=item
+        else:
+            drives.append(item)
+    return tape,drives
+
 def _build_plan_diff_dialog(self, role_name, diff):
     dlg=QDialog(self if isinstance(self, QWidget) else None)
     dlg.setWindowTitle(f"{role_name} - 配装变动")
-    dlg.setMinimumSize(820,560)
+    dlg.setMinimumSize(960,560)
     dlg.setStyleSheet(STYLE)
     layout=QVBoxLayout(dlg); layout.setContentsMargins(14,14,14,14); layout.setSpacing(10)
     scroll=QScrollArea(); scroll.setWidgetResizable(True)
     body=QWidget(); body_layout=QVBoxLayout(body); body_layout.setContentsMargins(0,0,0,0); body_layout.setSpacing(10)
     section_label=getattr(self, "_section_label", None) or (lambda text: _section_label(self, text))
     diff_item_card=getattr(self, "_diff_item_card", None) or (lambda role, item, is_new=False: _diff_item_card(self, role, item, is_new))
+
+    saved_sources=getattr(self,"_diff_saved_sources",None) or (lambda role: _diff_saved_sources(self,role))
+    plan_sources=getattr(self,"_diff_plan_sources",None) or (lambda role: _diff_plan_sources(self,role))
+    old_tape,old_drives=_split_loadout_sources(saved_sources(role_name))
+    new_tape,new_drives=_split_loadout_sources(plan_sources(role_name))
+    old_rows=self._equipment_bonus_rows(role_name,old_tape,old_drives) if old_tape or old_drives else []
+    new_rows=self._equipment_bonus_rows(role_name,new_tape,new_drives) if new_tape or new_drives else []
+    body_layout.addWidget(section_label("属性汇总对比"))
+    body_layout.addWidget(self._bonus_comparison_widget(role_name,old_rows,new_rows,has_old=bool(old_tape or old_drives)))
 
     removed=diff.get("removed",[]) or []
     added=diff.get("added",[]) or []
@@ -633,6 +655,62 @@ def _format_bonus_value(self, stat, value):
     if suffix:
         return f"+{value:.2f}%"
     return f"+{value:.0f}" if abs(value-round(value))<0.01 else f"+{value:.2f}"
+
+def _bonus_comparison_column(self, title, rows, empty_text="暂无可汇总属性"):
+    column=QFrame()
+    column.setStyleSheet("QFrame{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:6px}")
+    layout=QVBoxLayout(column); layout.setContentsMargins(7,5,7,5); layout.setSpacing(4)
+    header=QLabel(title)
+    header.setStyleSheet("font-size:11px;font-weight:800;color:#8b949e;border:none;background:transparent")
+    layout.addWidget(header)
+    if not rows:
+        empty=QLabel(empty_text)
+        empty.setStyleSheet("color:#6e7681;border:none;background:transparent")
+        layout.addWidget(empty)
+    else:
+        for stat,value in rows:
+            layout.addWidget(self._bonus_row_widget(stat,value))
+    layout.addStretch()
+    return column
+
+def _bonus_comparison_widget(self, role_name, old_rows, new_rows, has_old=True):
+    box=QFrame()
+    box.setStyleSheet("QFrame{background:transparent;border:none}")
+    layout=QHBoxLayout(box); layout.setContentsMargins(0,0,0,0); layout.setSpacing(10)
+    old_title="旧方案属性汇总"
+    new_title="新方案属性汇总"
+    old_empty="无已保存配装" if not has_old else "暂无可汇总属性"
+    layout.addWidget(self._bonus_comparison_column(old_title,old_rows,old_empty),1)
+    layout.addWidget(self._bonus_comparison_column(new_title,new_rows),1)
+
+    old_map=dict(old_rows or [])
+    new_map=dict(new_rows or [])
+    shared=sorted(set(old_map) | set(new_map), key=lambda stat: new_map.get(stat, old_map.get(stat, 0)), reverse=True)
+    delta_rows=[stat for stat in shared if stat in old_map and stat in new_map and old_map[stat]!=new_map[stat]]
+    if delta_rows:
+        delta_box=QFrame()
+        delta_box.setStyleSheet("QFrame{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:6px;margin-top:4px}")
+        delta_layout=QVBoxLayout(delta_box); delta_layout.setContentsMargins(7,5,7,5); delta_layout.setSpacing(3)
+        delta_title=QLabel("属性变化")
+        delta_title.setStyleSheet("font-size:11px;font-weight:800;color:#8b949e;border:none;background:transparent")
+        delta_layout.addWidget(delta_title)
+        for stat in delta_rows[:6]:
+            before=old_map[stat]
+            after=new_map[stat]
+            diff=round(after-before,4)
+            sign="+" if diff>=0 else ""
+            color="#56d364" if diff>=0 else "#f85149"
+            if stat.replace("%","") in {"暴击率","暴击率%"} or stat=="暴击率%":
+                color="#d2991d" if diff>=0 else "#f85149"
+            row=QLabel(f"{stat}  {self._format_bonus_value(stat,before)} → {self._format_bonus_value(stat,after)}  ({sign}{diff:.2f}{'%' if '%' in stat else ''})")
+            row.setStyleSheet(f"font-size:10px;font-weight:700;color:{color};border:none;background:transparent")
+            delta_layout.addWidget(row)
+        outer=QVBoxLayout(); outer.setContentsMargins(0,0,0,0); outer.setSpacing(6)
+        outer.addWidget(box)
+        outer.addWidget(delta_box)
+        container=QFrame(); container.setLayout(outer)
+        return container
+    return box
 
 def _bonus_summary_widget(self, role_name, tape, drives):
     rows=self._equipment_bonus_rows(role_name,tape,drives)

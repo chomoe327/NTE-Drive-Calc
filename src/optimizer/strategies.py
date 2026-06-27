@@ -11,7 +11,14 @@ from typing import List, Dict, Any
 from src.utils.logger import logger
 from src.utils.name_resolver import resolve_name
 from src.models.equipment import Drive, Tape
-from src.optimizer.contracts import AllocationResult, CandidatePool, CustomSetMap, StatPriorityConfigMap
+from src.domain.crit_threshold import (
+    crit_rank_adjustment,
+    drive_has_crit,
+    loadout_crit_total,
+    normalize_preference_config,
+    preference_config_active,
+)
+from src.domain.grade_limits import meets_min_grade
 
 class BaseDispatchStrategy:
     MAX_COMBO_LIMIT = 500
@@ -33,16 +40,43 @@ class BaseDispatchStrategy:
         return target_set
 
     def _stat_priority_config(self, config) -> dict:
-        if not isinstance(config, dict):
-            return {}
-        stats = [str(s) for s in config.get("stats", []) if s]
+        normalized = normalize_preference_config(config)
+        stats = normalized.get("stats", [])
         if not stats:
             return {}
         return {
             "stats": stats,
-            "equal_priority": bool(config.get("equal_priority", False)),
-            "ignore_grade_limit": bool(config.get("ignore_grade_limit", False)),
+            "equal_priority": normalized.get("equal_priority", False),
+            "ignore_grade_limit": normalized.get("ignore_grade_limit", False),
+            "min_grade_limit": normalized.get("min_grade_limit", "A"),
         }
+
+    def _preference_config(self, config) -> dict:
+        return normalize_preference_config(config)
+
+    def _group_uses_crit_thresholds(self, group: list[str], crit_priority_modes: Dict[str, dict]) -> bool:
+        return any(preference_config_active(crit_priority_modes.get(role)) for role in group)
+
+    def _role_crit_context(self, role: str) -> dict:
+        role_data = self.roles_db.get(role, {}) or {}
+        alias_mapping = {}
+        return {
+            "role_data": role_data,
+            "alias_mapping": alias_mapping,
+            "tape_main_values": {},
+            "shape_areas": {},
+        }
+
+    def _current_role_crit(self, role: str, tape, drives: list[Drive]) -> float:
+        ctx = self._role_crit_context(role)
+        return loadout_crit_total(
+            ctx["role_data"],
+            tape,
+            drives,
+            alias_mapping=ctx["alias_mapping"],
+            tape_main_values=ctx["tape_main_values"],
+            shape_areas=ctx["shape_areas"],
+        )
 
     def _item_has_stat(self, item, stat_key: str) -> bool:
         target = str(stat_key or "").replace("%", "")
@@ -57,34 +91,71 @@ class BaseDispatchStrategy:
         area = getattr(item, "area", 1) or 1
         return score >= area * 10.0 * 0.4
 
-    def _rank_score_for_item(self, role: str, item, base_score: float, config) -> float:
+    def _meets_grade_limit(self, role: str, item, config) -> bool:
+        cfg = self._preference_config(config)
+        if not cfg:
+            return False
+        if cfg.get("ignore_grade_limit"):
+            return True
+        score = getattr(item, "role_scores", {}).get(role, 0.0)
+        area = getattr(item, "area", 1) or 1
+        return meets_min_grade(score, area, cfg.get("min_grade_limit", "A"))
+
+    def _rank_score_for_item(self, role: str, item, base_score: float, config, current_crit: float | None = None) -> float:
         if base_score < 0:
             return base_score
         cfg = self._stat_priority_config(config)
         stats = cfg.get("stats", [])
-        if not stats or (not cfg.get("ignore_grade_limit") and not self._is_a_grade_item(role, item)):
-            return base_score
-        if cfg.get("equal_priority"):
-            covered = self._covered_stat_count(item, stats)
-            return base_score + covered * 100000.0 if covered else base_score
-        for tier, stat_key in enumerate(stats):
-            if self._item_has_stat(item, stat_key):
-                return base_score + (len(stats) - tier) * 100000.0
-        return base_score
+        score = base_score
+        if stats and self._meets_grade_limit(role, item, config):
+            if cfg.get("equal_priority"):
+                covered = self._covered_stat_count(item, stats)
+                if covered:
+                    score = base_score + covered * 100000.0
+            else:
+                for tier, stat_key in enumerate(stats):
+                    if self._item_has_stat(item, stat_key):
+                        score = base_score + (len(stats) - tier) * 100000.0
+                        break
+        pref = self._preference_config(config)
+        if current_crit is not None and preference_config_active(config):
+            score += crit_rank_adjustment(
+                current_crit,
+                drive_has_crit(item),
+                pref.get("crit_min_threshold", 20.0),
+                pref.get("crit_max_threshold", 95.0),
+            )
+        return score
 
-    def _rank_score_for_drive(self, role: str, drive: Drive, base_score: float, config) -> float:
-        return self._rank_score_for_item(role, drive, base_score, config)
+    def _rank_score_for_drive(self, role: str, drive: Drive, base_score: float, config, current_crit: float | None = None) -> float:
+        return self._rank_score_for_item(role, drive, base_score, config, current_crit=current_crit)
 
     def _set_pieces_for_blueprint(self, blueprint: Dict, target_set: str) -> list[str]:
         if "set_pieces" in blueprint:
             return list(blueprint.get("set_pieces") or [])
         return list(self.sets_db[target_set]["shapes"])
 
-    def _pick_best_drive(self, role: str, candidates: list[tuple[int, Drive]], config=None) -> tuple[int, Drive, float] | None:
+    def _pick_best_drive(
+        self,
+        role: str,
+        candidates: list[tuple[int, Drive]],
+        config=None,
+        current_crit: float | None = None,
+    ) -> tuple[int, Drive, float] | None:
         if not candidates:
             return None
         ranked = [
-            (self._rank_score_for_drive(role, drive, drive.role_scores.get(role, 0.0), config), idx, drive)
+            (
+                self._rank_score_for_drive(
+                    role,
+                    drive,
+                    drive.role_scores.get(role, 0.0),
+                    config,
+                    current_crit=current_crit,
+                ),
+                idx,
+                drive,
+            )
             for idx, drive in candidates
         ]
         _, idx, drive = max(ranked, key=lambda item: item[0])
@@ -347,26 +418,35 @@ class RolePriorityStrategy(BaseDispatchStrategy):
             buckets.setdefault(drive.shape_id, []).append((index, drive))
         return buckets
 
-    def _find_best_fit(self, role_name: str, blueprint: Dict, available_pool: List[Drive], target_set: str,
-                       crit_mode: str | None = None) -> Dict:
+    def _find_best_fit(
+        self,
+        role_name: str,
+        blueprint: Dict,
+        available_pool: List[Drive],
+        target_set: str,
+        crit_mode: str | None = None,
+        assigned_tape=None,
+    ) -> Dict:
         set_shapes = self._set_pieces_for_blueprint(blueprint, target_set)
         extra_shapes = blueprint["extra_pieces"]
         drive_buckets = self._drive_buckets(available_pool)
 
         used_indices = set()
         assigned_set, assigned_extra, total_score = [], [], 0.0
+        current_crit = self._current_role_crit(role_name, assigned_tape, [])
 
         for req_shape in set_shapes:
             candidates = [
                 (idx, drive) for idx, drive in drive_buckets.get(req_shape, [])
                 if idx not in used_indices
             ]
-            picked = self._pick_best_drive(role_name, candidates, crit_mode)
+            picked = self._pick_best_drive(role_name, candidates, crit_mode, current_crit=current_crit)
             if picked:
                 best_idx, best_drive, highest_score = picked
                 assigned_set.append(best_drive)
                 total_score += highest_score
                 used_indices.add(best_idx)
+                current_crit = self._current_role_crit(role_name, assigned_tape, assigned_set + assigned_extra)
             else:
                 return {"valid": False, "score": 0.0}
 
@@ -375,12 +455,13 @@ class RolePriorityStrategy(BaseDispatchStrategy):
                 (idx, drive) for idx, drive in drive_buckets.get(req_shape, [])
                 if idx not in used_indices
             ]
-            picked = self._pick_best_drive(role_name, candidates, crit_mode)
+            picked = self._pick_best_drive(role_name, candidates, crit_mode, current_crit=current_crit)
             if picked:
                 best_idx, best_drive, highest_score = picked
                 assigned_extra.append(best_drive)
                 total_score += highest_score
                 used_indices.add(best_idx)
+                current_crit = self._current_role_crit(role_name, assigned_tape, assigned_set + assigned_extra)
             else:
                 return {"valid": False, "score": 0.0}
 
@@ -536,6 +617,48 @@ class RolePriorityStrategy(BaseDispatchStrategy):
             for role in group
         }
 
+    def _assign_group_slots_greedy(
+        self,
+        slots: list[dict],
+        drives_pool: list[Drive],
+        assigned_tapes: Dict[str, Tape],
+        crit_priority_modes: Dict[str, dict],
+        valid_group: list[str],
+    ):
+        used_uids: set[str] = set()
+        role_crit = {
+            role: self._current_role_crit(role, assigned_tapes.get(role), [])
+            for role in valid_group
+        }
+        temp_alloc = self._init_temp_alloc(valid_group, assigned_tapes)
+
+        for slot in slots:
+            role = slot["role"]
+            config = crit_priority_modes.get(role)
+            current_crit = role_crit.get(role, 0.0)
+            candidates = [
+                (idx, drive)
+                for idx, drive in enumerate(drives_pool)
+                if drive.uid not in used_uids and drive.shape_id == slot["shape"]
+            ]
+            picked = self._pick_best_drive(role, candidates, config, current_crit=current_crit)
+            if not picked:
+                return None
+            _, drive, score = picked
+            used_uids.add(drive.uid)
+            temp_alloc[role]["blueprint"] = slot["bp"]
+            if slot["type"] == "set":
+                temp_alloc[role]["assigned_set_drives"].append(drive)
+            else:
+                temp_alloc[role]["assigned_extra_drives"].append(drive)
+            temp_alloc[role]["score"] += score
+            role_crit[role] = self._current_role_crit(
+                role,
+                assigned_tapes.get(role),
+                temp_alloc[role]["assigned_set_drives"] + temp_alloc[role]["assigned_extra_drives"],
+            )
+        return temp_alloc
+
     def _find_best_group_fit(
         self,
         group: list[str],
@@ -556,6 +679,7 @@ class RolePriorityStrategy(BaseDispatchStrategy):
 
         best_score = -1.0
         best_allocation = {}
+        use_greedy = self._group_uses_crit_thresholds(valid_group, crit_priority_modes)
         for bp_combo in self._iter_bp_combos(
             role_blueprints,
             valid_group,
@@ -568,26 +692,40 @@ class RolePriorityStrategy(BaseDispatchStrategy):
             )
             if slots is None:
                 continue
-            row_ind, col_ind = linear_sum_assignment(-ranking_matrix)
-            temp_alloc = self._init_temp_alloc(valid_group, assigned_tapes)
-            team_score = sum(item["score"] for item in temp_alloc.values())
-            is_valid = True
-            for slot_idx, drive_idx in zip(row_ind, col_ind):
-                profit = profit_matrix[slot_idx, drive_idx]
-                if profit < 0:
-                    is_valid = False
-                    break
-                slot = slots[slot_idx]
-                drive = drives_pool[drive_idx]
-                role = slot["role"]
-                temp_alloc[role]["blueprint"] = slot["bp"]
-                if slot["type"] == "set":
-                    temp_alloc[role]["assigned_set_drives"].append(drive)
-                else:
-                    temp_alloc[role]["assigned_extra_drives"].append(drive)
-                temp_alloc[role]["score"] += profit
-                team_score += profit
-            if is_valid and team_score > best_score:
+            if use_greedy:
+                temp_alloc = self._assign_group_slots_greedy(
+                    slots,
+                    drives_pool,
+                    assigned_tapes,
+                    crit_priority_modes,
+                    valid_group,
+                )
+                if temp_alloc is None:
+                    continue
+                team_score = sum(item["score"] for item in temp_alloc.values())
+            else:
+                row_ind, col_ind = linear_sum_assignment(-ranking_matrix)
+                temp_alloc = self._init_temp_alloc(valid_group, assigned_tapes)
+                team_score = sum(item["score"] for item in temp_alloc.values())
+                is_valid = True
+                for slot_idx, drive_idx in zip(row_ind, col_ind):
+                    profit = profit_matrix[slot_idx, drive_idx]
+                    if profit < 0:
+                        is_valid = False
+                        break
+                    slot = slots[slot_idx]
+                    drive = drives_pool[drive_idx]
+                    role = slot["role"]
+                    temp_alloc[role]["blueprint"] = slot["bp"]
+                    if slot["type"] == "set":
+                        temp_alloc[role]["assigned_set_drives"].append(drive)
+                    else:
+                        temp_alloc[role]["assigned_extra_drives"].append(drive)
+                    temp_alloc[role]["score"] += profit
+                    team_score += profit
+                if not is_valid:
+                    continue
+            if team_score > best_score:
                 best_score = team_score
                 best_allocation = temp_alloc
 
@@ -640,7 +778,14 @@ class RolePriorityStrategy(BaseDispatchStrategy):
             best_plan = {"valid": False, "score": -1.0}
 
             for bp in blueprints:
-                plan = self._find_best_fit(role_name, bp, role_drives_pool, target_set, crit_priority_modes.get(role_name))
+                plan = self._find_best_fit(
+                    role_name,
+                    bp,
+                    role_drives_pool,
+                    target_set,
+                    crit_priority_modes.get(role_name),
+                    assigned_tapes.get(role_name),
+                )
                 if plan["valid"]:
                     total_score = plan["score"] + tape_score
                     if total_score > best_plan["score"]:

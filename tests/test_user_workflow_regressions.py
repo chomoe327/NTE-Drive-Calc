@@ -1247,7 +1247,23 @@ class ExecutePageWorkflowTests(unittest.TestCase):
         class Window:
             def __init__(self):
                 self.roles_db = {"A": {"weights": {}}}
+                self.stats_config = {}
+                self.scoring_engine = None
+                self.equipped_state = {}
+                self.final_plan = {}
                 self.card_labels = []
+
+            def _equipment_bonus_rows(self, *_args, **_kwargs):
+                return []
+
+            def _bonus_comparison_widget(self, *_args, **_kwargs):
+                return QWidget()
+
+            def _bonus_row_widget(self, *_args, **_kwargs):
+                return QWidget()
+
+            def _format_bonus_value(self, _stat, value):
+                return str(value)
 
             def _equip_card(self, label, *_args, **_kwargs):
                 self.card_labels.append(label)
@@ -1981,6 +1997,215 @@ class ScoringScreeningWorkflowTests(unittest.TestCase):
             strategy._rank_score_for_drive("A", drive, 10.0, {"stats": ["Crit"], "ignore_grade_limit": True}),
             10.0,
         )
+
+    def test_stat_priority_respects_configurable_min_grade_limit(self):
+        from src.models.equipment import Drive
+        from src.optimizer.strategies import BaseDispatchStrategy
+
+        strategy = BaseDispatchStrategy({}, {}, {})
+        drive_b = Drive(
+            uid="drive_b",
+            quality="Gold",
+            area=4,
+            shape_id="S1",
+            set_name="Set",
+            main_stats={"m1": 1, "m2": 1},
+            sub_stats={"Crit": 1},
+            role_scores={"A": 14.0},
+        )
+        drive_c = Drive(
+            uid="drive_c",
+            quality="Gold",
+            area=4,
+            shape_id="S1",
+            set_name="Set",
+            main_stats={"m1": 1, "m2": 1},
+            sub_stats={"Crit": 1},
+            role_scores={"A": 8.0},
+        )
+        config = {"stats": ["Crit"], "min_grade_limit": "B"}
+
+        self.assertGreater(strategy._rank_score_for_drive("A", drive_b, 14.0, config), 14.0)
+        self.assertEqual(strategy._rank_score_for_drive("A", drive_c, 8.0, config), 8.0)
+
+    def test_crit_min_threshold_boosts_and_stops_after_target(self):
+        from src.models.equipment import Drive
+        from src.optimizer.strategies import BaseDispatchStrategy
+
+        strategy = BaseDispatchStrategy({}, {}, {})
+        crit_drive = Drive(
+            uid="crit_drive",
+            quality="Gold",
+            area=2,
+            shape_id="S1",
+            set_name="Set",
+            main_stats={"m1": 1, "m2": 1},
+            sub_stats={"暴击率%": 3.0},
+            role_scores={"A": 10.0},
+        )
+        plain_drive = Drive(
+            uid="plain_drive",
+            quality="Gold",
+            area=2,
+            shape_id="S1",
+            set_name="Set",
+            main_stats={"m1": 1, "m2": 1},
+            sub_stats={"攻击力%": 3.0},
+            role_scores={"A": 10.0},
+        )
+        config = {"stats": [], "crit_min_threshold": 20, "crit_max_threshold": 95}
+
+        below_min_crit = strategy._rank_score_for_drive("A", crit_drive, 10.0, config, current_crit=5.0)
+        below_min_plain = strategy._rank_score_for_drive("A", plain_drive, 10.0, config, current_crit=5.0)
+        at_min_crit = strategy._rank_score_for_drive("A", crit_drive, 10.0, config, current_crit=25.0)
+
+        self.assertGreater(below_min_crit, below_min_plain)
+        self.assertEqual(at_min_crit, 10.0)
+
+    def test_crit_max_threshold_penalizes_crit_drives(self):
+        from src.models.equipment import Drive
+        from src.optimizer.strategies import BaseDispatchStrategy
+
+        strategy = BaseDispatchStrategy({}, {}, {})
+        crit_drive = Drive(
+            uid="crit_drive",
+            quality="Gold",
+            area=2,
+            shape_id="S1",
+            set_name="Set",
+            main_stats={"m1": 1, "m2": 1},
+            sub_stats={"暴击率%": 2.0},
+            role_scores={"A": 10.0},
+        )
+        config = {"stats": [], "crit_min_threshold": 20, "crit_max_threshold": 95}
+        penalized = strategy._rank_score_for_drive("A", crit_drive, 10.0, config, current_crit=95.0)
+        self.assertLess(penalized, 10.0)
+
+    def test_bonus_comparison_widget_renders_old_and_new_totals(self):
+        from PySide6.QtWidgets import QApplication, QLabel, QWidget
+
+        from src.features.allocation import results_view
+
+        app = QApplication.instance() or QApplication([])
+
+        class Window:
+            def __init__(self):
+                self.roles_db = {"A": {"weights": {}}}
+                self.stats_config = {}
+                self.scoring_engine = None
+                self.equipped_state = {
+                    "A": {
+                        "equipped_tape": {
+                            "uid": "tape_old",
+                            "type": "tape",
+                            "main_stats": "暴击率",
+                            "main_value": 10.0,
+                            "sub_stats": {},
+                            "quality": "Gold",
+                        },
+                        "equipped_drives": [
+                            {
+                                "uid": "drive_old",
+                                "shape_id": "H_2",
+                                "sub_stats": {"暴击率%": 5.0},
+                                "quality": "Gold",
+                                "area": 2,
+                            }
+                        ],
+                    }
+                }
+                self.final_plan = {
+                    "A": {
+                        "assigned_tape": {
+                            "uid": "tape_new",
+                            "main_stats": "暴击率",
+                            "main_value": 12.0,
+                            "sub_stats": {},
+                            "quality": "Gold",
+                            "area": 15,
+                        },
+                        "assigned_set_drives": [
+                            {
+                                "uid": "drive_new",
+                                "shape_id": "H_2",
+                                "sub_stats": {"暴击率%": 8.0},
+                                "quality": "Gold",
+                                "area": 2,
+                            }
+                        ],
+                        "assigned_extra_drives": [],
+                    }
+                }
+
+            def _canonical_stat_name(self, stat):
+                return "暴击率%" if str(stat) == "暴击率" else str(stat or "")
+
+            def _stat_number_value(self, value):
+                return float(value)
+
+            def _item_value(self, item, key, default=None):
+                if isinstance(item, dict):
+                    return item.get(key, default)
+                return getattr(item, key, default)
+
+            def _quality_coef(self, _quality):
+                return 1.0
+
+            def _fallback_tape_main_value(self, main_stat, _quality):
+                return 10.0 if str(main_stat) == "暴击率" else 0.0
+
+            def _extra_shape_area(self, _role_name):
+                return None
+
+            def _add_stat_total(self, totals, stat, value):
+                stat = self._canonical_stat_name(stat)
+                totals[stat] = totals.get(stat, 0.0) + float(value)
+
+            def _equip_card(self, *_args, **_kwargs):
+                return QWidget()
+
+        window = Window()
+        window._equipment_bonus_rows = lambda role, tape, drives: results_view._equipment_bonus_rows(window, role, tape, drives)
+        window._bonus_comparison_widget = lambda *args, **kwargs: results_view._bonus_comparison_widget(window, *args, **kwargs)
+        window._bonus_comparison_column = lambda *args, **kwargs: results_view._bonus_comparison_column(window, *args, **kwargs)
+        window._bonus_row_widget = lambda *args, **kwargs: results_view._bonus_row_widget(window, *args, **kwargs)
+        window._format_bonus_value = lambda *args, **kwargs: results_view._format_bonus_value(window, *args, **kwargs)
+
+        dialog = results_view._build_plan_diff_dialog(
+            window,
+            "A",
+            {
+                "removed": [{"uid": "drive_old", "type": "drive", "shape_id": "H_2", "sub_stats": {"暴击率%": 5.0}}],
+                "added": [{"uid": "drive_new", "type": "drive", "shape_id": "H_2", "sub_stats": {"暴击率%": 8.0}}],
+            },
+        )
+        labels = [label.text() for label in dialog.findChildren(QLabel)]
+        self.assertIn("属性汇总对比", labels)
+        self.assertIn("旧方案属性汇总", labels)
+        self.assertIn("新方案属性汇总", labels)
+        app.processEvents()
+
+    def test_role_selector_persists_crit_threshold_config_fields(self):
+        from PySide6.QtWidgets import QApplication
+
+        from src.features.allocation.role_selector import RoleSelector
+
+        app = QApplication.instance() or QApplication([])
+        selector = RoleSelector()
+        selector.load_roles({"A": {"default_set": "Set"}}, ["Set"], ["暴击率"], ["暴击率%", "攻击力%"])
+        selector.selected = ["A"]
+        selector._set_stat_priority_config(
+            "A",
+            ["暴击率%"],
+            min_grade_limit="B",
+            crit_min_threshold=25,
+            crit_max_threshold=90,
+        )
+        saved = selector.get_crit_priority_modes()["A"]
+        self.assertEqual("B", saved["min_grade_limit"])
+        self.assertEqual(25, saved["crit_min_threshold"])
+        self.assertEqual(90, saved["crit_max_threshold"])
+        app.processEvents()
 
     def test_grouped_role_priority_assigns_zero_score_tapes_from_filtered_pool(self):
         from src.models.equipment import Tape
