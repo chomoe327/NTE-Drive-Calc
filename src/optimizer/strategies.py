@@ -11,6 +11,7 @@ from typing import List, Dict, Any
 from src.utils.logger import logger
 from src.utils.name_resolver import resolve_name
 from src.models.equipment import Drive, Tape
+from src.optimizer.contracts import AllocationResult, CandidatePool, CustomSetMap, StatPriorityConfigMap
 from src.domain.crit_threshold import (
     crit_rank_adjustment,
     drive_has_crit,
