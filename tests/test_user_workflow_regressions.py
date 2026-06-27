@@ -2169,6 +2169,8 @@ class ScoringScreeningWorkflowTests(unittest.TestCase):
         window._bonus_comparison_widget = lambda *args, **kwargs: results_view._bonus_comparison_widget(window, *args, **kwargs)
         window._bonus_comparison_column = lambda *args, **kwargs: results_view._bonus_comparison_column(window, *args, **kwargs)
         window._aligned_bonus_comparison_rows = lambda *args, **kwargs: results_view._aligned_bonus_comparison_rows(window, *args, **kwargs)
+        window._has_bonus_delta = lambda *args, **kwargs: results_view._has_bonus_delta(window, *args, **kwargs)
+        window._bonus_spacer_row = lambda *args, **kwargs: results_view._bonus_spacer_row(window, *args, **kwargs)
         window._bonus_placeholder_row_widget = lambda *args, **kwargs: results_view._bonus_placeholder_row_widget(window, *args, **kwargs)
         window._bonus_delta_row_widget = lambda *args, **kwargs: results_view._bonus_delta_row_widget(window, *args, **kwargs)
         window._bonus_delta_column = lambda *args, **kwargs: results_view._bonus_delta_column(window, *args, **kwargs)
