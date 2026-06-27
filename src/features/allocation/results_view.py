@@ -17,7 +17,7 @@ from src.ui.puzzle_board import PuzzleBoardWidget, get_shape_pixmap as _get_shap
 
 from src.ui.main_window_method_install import install_methods as _install_main_window_methods
 
-__all__ = ['_section_label', '_render_results', '_calc_grade', '_show_plan_diff_dialog', '_build_plan_diff_dialog', '_diff_item_card', '_diff_item_score_info', '_plan_diff_text', '_stat_w', '_stat_c', '_weighted_score', '_quality_coef', '_canonical_stat_name', '_stat_number_value', '_item_value', '_add_stat_total', '_fallback_tape_main_value', '_extra_shape_area', '_equipment_bonus_rows', '_format_bonus_value', '_bonus_summary_widget', '_bonus_row_widget', '_bonus_comparison_widget', '_show_bonus_summary_dialog', '_score_drive_dict', '_score_tape_dict', '_equip_card']
+__all__ = ['_section_label', '_render_results', '_calc_grade', '_show_plan_diff_dialog', '_build_plan_diff_dialog', '_diff_item_card', '_diff_item_score_info', '_plan_diff_text', '_stat_w', '_stat_c', '_weighted_score', '_quality_coef', '_canonical_stat_name', '_stat_number_value', '_item_value', '_add_stat_total', '_fallback_tape_main_value', '_extra_shape_area', '_equipment_bonus_rows', '_format_bonus_value', '_bonus_summary_widget', '_role_bonus_summary_panel', '_bonus_row_widget', '_bonus_comparison_widget', '_show_bonus_summary_dialog', '_score_drive_dict', '_score_tape_dict', '_equip_card']
 
 
 def install_methods(app_module, window_cls):
@@ -90,7 +90,7 @@ def _render_results(self,plan):
             gl.addWidget(self._section_label("拼图图纸:"))
             bp_row=QHBoxLayout(); bp_row.setSpacing(44)
             bp_row.addWidget(PuzzleBoardWidget(board),0,Qt.AlignTop)
-            bp_row.addWidget(self._bonus_summary_widget(role,tape,drives),0,Qt.AlignTop)
+            bp_row.addWidget(self._role_bonus_summary_panel(role,tape,drives,compare_with_saved=bool(role_diff.get("changed"))),0,Qt.AlignTop)
             bp_row.addStretch(1)
             gl.addLayout(bp_row); gl.addSpacing(8)
 
@@ -348,22 +348,13 @@ def _split_loadout_sources(sources):
 def _build_plan_diff_dialog(self, role_name, diff):
     dlg=QDialog(self if isinstance(self, QWidget) else None)
     dlg.setWindowTitle(f"{role_name} - 配装变动")
-    dlg.setMinimumSize(960,560)
+    dlg.setMinimumSize(820,560)
     dlg.setStyleSheet(STYLE)
     layout=QVBoxLayout(dlg); layout.setContentsMargins(14,14,14,14); layout.setSpacing(10)
     scroll=QScrollArea(); scroll.setWidgetResizable(True)
     body=QWidget(); body_layout=QVBoxLayout(body); body_layout.setContentsMargins(0,0,0,0); body_layout.setSpacing(10)
     section_label=getattr(self, "_section_label", None) or (lambda text: _section_label(self, text))
     diff_item_card=getattr(self, "_diff_item_card", None) or (lambda role, item, is_new=False: _diff_item_card(self, role, item, is_new))
-
-    saved_sources=getattr(self,"_diff_saved_sources",None) or (lambda role: _diff_saved_sources(self,role))
-    plan_sources=getattr(self,"_diff_plan_sources",None) or (lambda role: _diff_plan_sources(self,role))
-    old_tape,old_drives=_split_loadout_sources(saved_sources(role_name))
-    new_tape,new_drives=_split_loadout_sources(plan_sources(role_name))
-    old_rows=self._equipment_bonus_rows(role_name,old_tape,old_drives) if old_tape or old_drives else []
-    new_rows=self._equipment_bonus_rows(role_name,new_tape,new_drives) if new_tape or new_drives else []
-    body_layout.addWidget(section_label("属性汇总对比"))
-    body_layout.addWidget(self._bonus_comparison_widget(role_name,old_rows,new_rows,has_old=bool(old_tape or old_drives)))
 
     removed=diff.get("removed",[]) or []
     added=diff.get("added",[]) or []
@@ -673,15 +664,20 @@ def _bonus_comparison_column(self, title, rows, empty_text="暂无可汇总属�
     layout.addStretch()
     return column
 
-def _bonus_comparison_widget(self, role_name, old_rows, new_rows, has_old=True):
+def _bonus_comparison_widget(self, role_name, old_rows, new_rows, has_old=True, compact=False):
     box=QFrame()
     box.setStyleSheet("QFrame{background:transparent;border:none}")
-    layout=QHBoxLayout(box); layout.setContentsMargins(0,0,0,0); layout.setSpacing(10)
-    old_title="旧方案属性汇总"
-    new_title="新方案属性汇总"
+    layout=QHBoxLayout(box); layout.setContentsMargins(0,0,0,0); layout.setSpacing(8 if compact else 10)
+    old_title="旧" if compact else "旧方案"
+    new_title="新" if compact else "新方案"
     old_empty="无已保存配装" if not has_old else "暂无可汇总属性"
-    layout.addWidget(self._bonus_comparison_column(old_title,old_rows,old_empty),1)
-    layout.addWidget(self._bonus_comparison_column(new_title,new_rows),1)
+    old_column=self._bonus_comparison_column(old_title,old_rows[:4] if compact else old_rows,old_empty)
+    new_column=self._bonus_comparison_column(new_title,new_rows[:4] if compact else new_rows)
+    if compact:
+        old_column.setFixedWidth(118)
+        new_column.setFixedWidth(118)
+    layout.addWidget(old_column,1)
+    layout.addWidget(new_column,1)
 
     old_map=dict(old_rows or [])
     new_map=dict(new_rows or [])
@@ -691,10 +687,10 @@ def _bonus_comparison_widget(self, role_name, old_rows, new_rows, has_old=True):
         delta_box=QFrame()
         delta_box.setStyleSheet("QFrame{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:6px;margin-top:4px}")
         delta_layout=QVBoxLayout(delta_box); delta_layout.setContentsMargins(7,5,7,5); delta_layout.setSpacing(3)
-        delta_title=QLabel("属性变化")
-        delta_title.setStyleSheet("font-size:11px;font-weight:800;color:#8b949e;border:none;background:transparent")
+        delta_title=QLabel("变化")
+        delta_title.setStyleSheet("font-size:10px;font-weight:800;color:#8b949e;border:none;background:transparent")
         delta_layout.addWidget(delta_title)
-        for stat in delta_rows[:6]:
+        for stat in delta_rows[:4 if compact else 6]:
             before=old_map[stat]
             after=new_map[stat]
             diff=round(after-before,4)
@@ -702,7 +698,7 @@ def _bonus_comparison_widget(self, role_name, old_rows, new_rows, has_old=True):
             color="#56d364" if diff>=0 else "#f85149"
             if stat.replace("%","") in {"暴击率","暴击率%"} or stat=="暴击率%":
                 color="#d2991d" if diff>=0 else "#f85149"
-            row=QLabel(f"{stat}  {self._format_bonus_value(stat,before)} → {self._format_bonus_value(stat,after)}  ({sign}{diff:.2f}{'%' if '%' in stat else ''})")
+            row=QLabel(f"{stat} {sign}{diff:.2f}{'%' if '%' in stat else ''}")
             row.setStyleSheet(f"font-size:10px;font-weight:700;color:{color};border:none;background:transparent")
             delta_layout.addWidget(row)
         outer=QVBoxLayout(); outer.setContentsMargins(0,0,0,0); outer.setSpacing(6)
@@ -711,6 +707,47 @@ def _bonus_comparison_widget(self, role_name, old_rows, new_rows, has_old=True):
         container=QFrame(); container.setLayout(outer)
         return container
     return box
+
+def _role_bonus_summary_panel(self, role_name, tape, drives, compare_with_saved=False):
+    if compare_with_saved:
+        saved_sources=_diff_saved_sources(self,role_name)
+        old_tape,old_drives=_split_loadout_sources(saved_sources)
+        if old_tape or old_drives:
+            old_rows=self._equipment_bonus_rows(role_name,old_tape,old_drives)
+            new_rows=self._equipment_bonus_rows(role_name,tape,drives)
+            box=QFrame()
+            box.setFixedWidth(280)
+            box.setStyleSheet("QFrame{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:6px}")
+            layout=QVBoxLayout(box); layout.setContentsMargins(7,5,7,5); layout.setSpacing(4)
+            title=QLabel("属性汇总")
+            title.setStyleSheet("font-size:11px;font-weight:800;color:#8b949e;border:none;background:transparent")
+            layout.addWidget(title)
+            layout.addWidget(self._bonus_comparison_widget(role_name,old_rows,new_rows,has_old=True,compact=True))
+            if len(old_rows)>4 or len(new_rows)>4:
+                more=QPushButton("•••")
+                more.setObjectName("btnSm")
+                more.setFixedSize(54,22)
+                more.setCursor(Qt.PointingHandCursor)
+                more.setStyleSheet("QPushButton{background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:8px;font-size:13px;font-weight:800;padding:0}QPushButton:hover{border-color:#58a6ff;color:#58a6ff}")
+                more.clicked.connect(
+                    lambda checked=False,role=role_name,old_r=old_rows,new_r=new_rows: self._show_bonus_comparison_dialog(role,old_r,new_r)
+                )
+                layout.addWidget(more,0,Qt.AlignCenter)
+            layout.addStretch()
+            return box
+    return self._bonus_summary_widget(role_name,tape,drives)
+
+def _show_bonus_comparison_dialog(self, role_name, old_rows, new_rows):
+    dlg=QDialog(self)
+    dlg.setWindowTitle(f"{role_name} 属性汇总对比")
+    dlg.setMinimumSize(520,420)
+    dlg.setStyleSheet(STYLE)
+    layout=QVBoxLayout(dlg); layout.setContentsMargins(14,14,14,14); layout.setSpacing(8)
+    layout.addWidget(self._bonus_comparison_widget(role_name,old_rows,new_rows,has_old=True,compact=False))
+    buttons=QDialogButtonBox(QDialogButtonBox.Ok)
+    buttons.accepted.connect(dlg.accept)
+    layout.addWidget(buttons)
+    dlg.exec()
 
 def _bonus_summary_widget(self, role_name, tape, drives):
     rows=self._equipment_bonus_rows(role_name,tape,drives)

@@ -2170,19 +2170,15 @@ class ScoringScreeningWorkflowTests(unittest.TestCase):
         window._bonus_comparison_column = lambda *args, **kwargs: results_view._bonus_comparison_column(window, *args, **kwargs)
         window._bonus_row_widget = lambda *args, **kwargs: results_view._bonus_row_widget(window, *args, **kwargs)
         window._format_bonus_value = lambda *args, **kwargs: results_view._format_bonus_value(window, *args, **kwargs)
+        window._role_bonus_summary_panel = lambda *args, **kwargs: results_view._role_bonus_summary_panel(window, *args, **kwargs)
 
-        dialog = results_view._build_plan_diff_dialog(
-            window,
-            "A",
-            {
-                "removed": [{"uid": "drive_old", "type": "drive", "shape_id": "H_2", "sub_stats": {"暴击率%": 5.0}}],
-                "added": [{"uid": "drive_new", "type": "drive", "shape_id": "H_2", "sub_stats": {"暴击率%": 8.0}}],
-            },
-        )
-        labels = [label.text() for label in dialog.findChildren(QLabel)]
-        self.assertIn("属性汇总对比", labels)
-        self.assertIn("旧方案属性汇总", labels)
-        self.assertIn("新方案属性汇总", labels)
+        new_tape = window.final_plan["A"]["assigned_tape"]
+        new_drives = window.final_plan["A"]["assigned_set_drives"]
+        panel = results_view._role_bonus_summary_panel(window, "A", new_tape, new_drives, compare_with_saved=True)
+        labels = [label.text() for label in panel.findChildren(QLabel)]
+        self.assertIn("属性汇总", labels)
+        self.assertIn("旧", labels)
+        self.assertIn("新", labels)
         app.processEvents()
 
     def test_role_selector_persists_crit_threshold_config_fields(self):
