@@ -2168,6 +2168,7 @@ class ScoringScreeningWorkflowTests(unittest.TestCase):
         window._equipment_bonus_rows = lambda role, tape, drives: results_view._equipment_bonus_rows(window, role, tape, drives)
         window._bonus_comparison_widget = lambda *args, **kwargs: results_view._bonus_comparison_widget(window, *args, **kwargs)
         window._bonus_comparison_column = lambda *args, **kwargs: results_view._bonus_comparison_column(window, *args, **kwargs)
+        window._bonus_delta_column = lambda *args, **kwargs: results_view._bonus_delta_column(window, *args, **kwargs)
         window._bonus_row_widget = lambda *args, **kwargs: results_view._bonus_row_widget(window, *args, **kwargs)
         window._format_bonus_value = lambda *args, **kwargs: results_view._format_bonus_value(window, *args, **kwargs)
         window._role_bonus_summary_panel = lambda *args, **kwargs: results_view._role_bonus_summary_panel(window, *args, **kwargs)
