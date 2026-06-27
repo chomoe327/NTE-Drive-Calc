@@ -2168,6 +2168,8 @@ class ScoringScreeningWorkflowTests(unittest.TestCase):
         window._equipment_bonus_rows = lambda role, tape, drives: results_view._equipment_bonus_rows(window, role, tape, drives)
         window._bonus_comparison_widget = lambda *args, **kwargs: results_view._bonus_comparison_widget(window, *args, **kwargs)
         window._bonus_comparison_column = lambda *args, **kwargs: results_view._bonus_comparison_column(window, *args, **kwargs)
+        window._role_stat_priority_stats = lambda role: ["暴击率%"]
+        window._sort_bonus_aligned_rows = lambda aligned, priority_stats=None, prioritize_changed_only=False: results_view._sort_bonus_aligned_rows(window, aligned, priority_stats, prioritize_changed_only)
         window._aligned_bonus_comparison_rows = lambda *args, **kwargs: results_view._aligned_bonus_comparison_rows(window, *args, **kwargs)
         window._has_bonus_delta = lambda *args, **kwargs: results_view._has_bonus_delta(window, *args, **kwargs)
         window._bonus_spacer_row = lambda *args, **kwargs: results_view._bonus_spacer_row(window, *args, **kwargs)
@@ -2186,6 +2188,29 @@ class ScoringScreeningWorkflowTests(unittest.TestCase):
         self.assertIn("旧", labels)
         self.assertIn("新", labels)
         app.processEvents()
+
+    def test_sort_bonus_rows_prioritizes_changed_role_stats_only_in_thumbnail(self):
+        from src.features.allocation import results_view
+
+        class Window:
+            pass
+
+        window = Window()
+        window._has_bonus_delta = lambda item: results_view._has_bonus_delta(window, item)
+        old_rows = [("生命值", 100.0), ("防御力%", 10.0), ("暴击伤害%", 50.0)]
+        new_rows = [("生命值", 100.0), ("防御力%", 17.0), ("暴击伤害%", 62.0)]
+        window._sort_bonus_aligned_rows = lambda aligned, priority_stats=None, prioritize_changed_only=False: results_view._sort_bonus_aligned_rows(
+            window, aligned, priority_stats, prioritize_changed_only
+        )
+        priority = ["生命值", "暴击伤害%"]
+        thumbnail_rows = results_view._aligned_bonus_comparison_rows(
+            window, old_rows, new_rows, changes_only=True, priority_stats=priority
+        )
+        dialog_rows = results_view._aligned_bonus_comparison_rows(
+            window, old_rows, new_rows, changes_only=False, priority_stats=priority
+        )
+        self.assertEqual(["暴击伤害%", "防御力%"], [item["stat"] for item in thumbnail_rows])
+        self.assertEqual(["生命值", "暴击伤害%", "防御力%"], [item["stat"] for item in dialog_rows])
 
     def test_role_selector_persists_crit_threshold_config_fields(self):
         from PySide6.QtWidgets import QApplication

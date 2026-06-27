@@ -17,7 +17,7 @@ from src.ui.puzzle_board import PuzzleBoardWidget, get_shape_pixmap as _get_shap
 
 from src.ui.main_window_method_install import install_methods as _install_main_window_methods
 
-__all__ = ['_section_label', '_render_results', '_calc_grade', '_show_plan_diff_dialog', '_build_plan_diff_dialog', '_diff_item_card', '_diff_item_score_info', '_plan_diff_text', '_stat_w', '_stat_c', '_weighted_score', '_quality_coef', '_canonical_stat_name', '_stat_number_value', '_item_value', '_add_stat_total', '_fallback_tape_main_value', '_extra_shape_area', '_equipment_bonus_rows', '_format_bonus_value', '_bonus_summary_widget', '_role_bonus_summary_panel', '_aligned_bonus_comparison_rows', '_has_bonus_delta', '_bonus_row_widget', '_bonus_placeholder_row_widget', '_bonus_spacer_row', '_bonus_comparison_column', '_bonus_delta_row_widget', '_bonus_delta_column', '_bonus_comparison_widget', '_show_bonus_summary_dialog', '_show_bonus_comparison_dialog', '_score_drive_dict', '_score_tape_dict', '_equip_card']
+__all__ = ['_section_label', '_render_results', '_calc_grade', '_show_plan_diff_dialog', '_build_plan_diff_dialog', '_diff_item_card', '_diff_item_score_info', '_plan_diff_text', '_stat_w', '_stat_c', '_weighted_score', '_quality_coef', '_canonical_stat_name', '_stat_number_value', '_item_value', '_add_stat_total', '_fallback_tape_main_value', '_extra_shape_area', '_equipment_bonus_rows', '_format_bonus_value', '_bonus_summary_widget', '_role_stat_priority_stats', '_sort_bonus_aligned_rows', '_role_bonus_summary_panel', '_aligned_bonus_comparison_rows', '_has_bonus_delta', '_bonus_row_widget', '_bonus_placeholder_row_widget', '_bonus_spacer_row', '_bonus_comparison_column', '_bonus_delta_row_widget', '_bonus_delta_column', '_bonus_comparison_widget', '_show_bonus_summary_dialog', '_show_bonus_comparison_dialog', '_score_drive_dict', '_score_tape_dict', '_equip_card']
 
 
 def install_methods(app_module, window_cls):
@@ -90,7 +90,7 @@ def _render_results(self,plan):
             gl.addWidget(self._section_label("拼图图纸:"))
             bp_row=QHBoxLayout(); bp_row.setSpacing(44)
             bp_row.addWidget(PuzzleBoardWidget(board),0,Qt.AlignTop)
-            bp_row.addWidget(self._role_bonus_summary_panel(role,tape,drives,compare_with_saved=bool(role_diff.get("changed"))),1,Qt.AlignTop)
+            bp_row.addWidget(self._role_bonus_summary_panel(role,tape,drives,compare_with_saved=bool(role_diff.get("changed")),priority_stats=self._role_stat_priority_stats(role)),1,Qt.AlignTop)
             gl.addLayout(bp_row); gl.addSpacing(8)
 
         if tape:
@@ -646,6 +646,64 @@ def _format_bonus_value(self, stat, value):
         return f"+{value:.2f}%"
     return f"+{value:.0f}" if abs(value-round(value))<0.01 else f"+{value:.2f}"
 
+def _is_crit_rate_stat(stat):
+    normalized=str(stat or "").replace("%","").strip()
+    return normalized in {"暴击率","暴击率%"}
+
+def _stats_match(stat, stat_key):
+    left=str(stat or "").replace("%","").strip()
+    right=str(stat_key or "").replace("%","").strip()
+    if not left or not right:
+        return False
+    return left == right or left in right or right in left
+
+def _is_highlighted_bonus_stat(stat, priority_stats=None):
+    if _is_crit_rate_stat(stat):
+        return True
+    for key in priority_stats or []:
+        if _stats_match(stat, key):
+            return True
+    return False
+
+def _bonus_stat_label_style(stat, priority_stats=None):
+    color="#d2991d" if _is_highlighted_bonus_stat(stat, priority_stats) else "#c9d1d9"
+    return f"font-size:10px;font-weight:700;color:{color};border:none;background:transparent"
+
+def _role_stat_priority_stats(self, role_name):
+    configs=getattr(self,"_pending_crit_priority_modes",None) or {}
+    if not configs and hasattr(self,"role_selector"):
+        try:
+            configs=self.role_selector.get_crit_priority_modes()
+        except Exception:
+            configs={}
+    cfg=configs.get(role_name) or {}
+    if not isinstance(cfg,dict):
+        return []
+    return [str(stat) for stat in cfg.get("stats", []) if stat]
+
+def _sort_bonus_aligned_rows(self, aligned, priority_stats=None, prioritize_changed_only=False):
+    priority_stats=list(priority_stats or [])
+
+    def priority_index(stat, item):
+        if prioritize_changed_only and not self._has_bonus_delta(item):
+            return None
+        for idx,key in enumerate(priority_stats):
+            if _stats_match(stat,key):
+                return idx
+        if _is_crit_rate_stat(stat):
+            return len(priority_stats)
+        return None
+
+    def sort_key(item):
+        stat=item.get("stat","")
+        idx=priority_index(stat, item)
+        if idx is not None:
+            return (0,idx)
+        max_val=max(float(item.get("old") or 0.0),float(item.get("new") or 0.0))
+        return (1,-max_val)
+
+    return sorted(aligned or [], key=sort_key)
+
 def _has_bonus_delta(self, item):
     delta=float(item.get("delta") or 0.0)
     if abs(delta) < 0.0001:
@@ -656,10 +714,10 @@ def _has_bonus_delta(self, item):
         return False
     return True
 
-def _aligned_bonus_comparison_rows(self, old_rows, new_rows, limit=None, changes_only=False):
+def _aligned_bonus_comparison_rows(self, old_rows, new_rows, limit=None, changes_only=False, priority_stats=None):
     old_map=dict(old_rows or [])
     new_map=dict(new_rows or [])
-    stats=sorted(set(old_map) | set(new_map), key=lambda stat: max(old_map.get(stat, 0.0), new_map.get(stat, 0.0)), reverse=True)
+    stats=set(old_map) | set(new_map)
     aligned=[]
     for stat in stats:
         old_val=old_map.get(stat)
@@ -675,7 +733,8 @@ def _aligned_bonus_comparison_rows(self, old_rows, new_rows, limit=None, changes
         aligned.append({"stat": stat, "old": old_val, "new": new_val, "delta": delta})
     if changes_only:
         aligned=[item for item in aligned if self._has_bonus_delta(item)]
-    elif limit is not None:
+    aligned=self._sort_bonus_aligned_rows(aligned,priority_stats,prioritize_changed_only=changes_only)
+    if limit is not None:
         aligned=aligned[:limit]
     return aligned
 
@@ -685,19 +744,19 @@ def _bonus_spacer_row(self):
     row.setStyleSheet("QFrame{background:transparent;border:none;}")
     return row
 
-def _bonus_placeholder_row_widget(self, stat, text="—"):
+def _bonus_placeholder_row_widget(self, stat, text="—", priority_stats=None):
     row=QFrame()
     row.setFixedHeight(26)
     row.setMinimumWidth(130)
     row.setStyleSheet("QFrame{background:#161b22;border:1px solid #21262d;border-radius:5px;padding:2px 6px}")
     rl=QHBoxLayout(row); rl.setContentsMargins(6,1,6,1); rl.setSpacing(6)
-    name=QLabel(stat); name.setWordWrap(True); name.setStyleSheet("font-size:10px;font-weight:700;color:#c9d1d9;border:none;background:transparent")
+    name=QLabel(stat); name.setWordWrap(True); name.setStyleSheet(_bonus_stat_label_style(stat,priority_stats))
     val=QLabel(text); val.setAlignment(Qt.AlignRight|Qt.AlignVCenter)
     val.setStyleSheet("font-size:10px;font-weight:700;color:#6e7681;border:none;background:transparent")
     rl.addWidget(name,1); rl.addWidget(val)
     return row
 
-def _bonus_comparison_column(self, title, aligned_rows, value_key, empty_text="暂无可汇总属性"):
+def _bonus_comparison_column(self, title, aligned_rows, value_key, empty_text="暂无可汇总属性", priority_stats=None):
     column=QFrame()
     column.setStyleSheet("QFrame{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:6px}")
     layout=QVBoxLayout(column); layout.setContentsMargins(7,5,7,5); layout.setSpacing(4)
@@ -712,13 +771,13 @@ def _bonus_comparison_column(self, title, aligned_rows, value_key, empty_text="�
         for item in aligned_rows:
             value=item.get(value_key)
             if value is None:
-                layout.addWidget(self._bonus_placeholder_row_widget(item["stat"]))
+                layout.addWidget(self._bonus_placeholder_row_widget(item["stat"], priority_stats=priority_stats))
             else:
-                layout.addWidget(self._bonus_row_widget(item["stat"], value))
+                layout.addWidget(self._bonus_row_widget(item["stat"], value, priority_stats=priority_stats))
     layout.addStretch()
     return column
 
-def _bonus_delta_row_widget(self, stat, delta, old_val, new_val):
+def _bonus_delta_row_widget(self, stat, delta, old_val, new_val, priority_stats=None):
     if not self._has_bonus_delta({"stat": stat, "delta": delta, "old": old_val, "new": new_val}):
         return self._bonus_spacer_row()
     row=QFrame()
@@ -726,19 +785,17 @@ def _bonus_delta_row_widget(self, stat, delta, old_val, new_val):
     row.setMinimumWidth(130)
     row.setStyleSheet("QFrame{background:#161b22;border:1px solid #21262d;border-radius:5px;padding:2px 6px}")
     rl=QHBoxLayout(row); rl.setContentsMargins(6,1,6,1); rl.setSpacing(6)
-    name=QLabel(stat); name.setWordWrap(True); name.setStyleSheet("font-size:10px;font-weight:700;color:#c9d1d9;border:none;background:transparent")
+    name=QLabel(stat); name.setWordWrap(True); name.setStyleSheet(_bonus_stat_label_style(stat,priority_stats))
     sign="+" if delta>=0 else ""
     suffix="%" if "%" in stat or "伤害增强" in stat or "治疗加成" in stat else ""
     text=f"{sign}{delta:.2f}{suffix}" if suffix else (f"{sign}{delta:.0f}" if abs(delta-round(delta))<0.01 else f"{sign}{delta:.2f}")
     color="#56d364" if delta>0 else "#f85149"
-    if stat.replace("%","") in {"暴击率","暴击率%"} or stat=="暴击率%":
-        color="#d2991d" if delta>0 else "#f85149"
     val=QLabel(text); val.setAlignment(Qt.AlignRight|Qt.AlignVCenter)
     val.setStyleSheet(f"font-size:10px;font-weight:800;color:{color};border:none;background:transparent")
     rl.addWidget(name,1); rl.addWidget(val)
     return row
 
-def _bonus_delta_column(self, aligned_rows):
+def _bonus_delta_column(self, aligned_rows, priority_stats=None):
     column=QFrame()
     column.setStyleSheet("QFrame{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:6px}")
     layout=QVBoxLayout(column); layout.setContentsMargins(7,5,7,5); layout.setSpacing(4)
@@ -751,30 +808,32 @@ def _bonus_delta_column(self, aligned_rows):
         layout.addWidget(empty)
     else:
         for item in aligned_rows:
-            layout.addWidget(self._bonus_delta_row_widget(item["stat"], item["delta"], item.get("old"), item.get("new")))
+            layout.addWidget(self._bonus_delta_row_widget(item["stat"], item["delta"], item.get("old"), item.get("new"), priority_stats=priority_stats))
     layout.addStretch()
     return column
 
-def _bonus_comparison_widget(self, role_name, old_rows, new_rows, has_old=True, compact=False):
+def _bonus_comparison_widget(self, role_name, old_rows, new_rows, has_old=True, compact=False, priority_stats=None):
+    priority_stats=list(priority_stats or [])
     if compact:
-        aligned=self._aligned_bonus_comparison_rows(old_rows,new_rows,changes_only=True)
+        aligned=self._aligned_bonus_comparison_rows(old_rows,new_rows,changes_only=True,priority_stats=priority_stats)
     else:
-        aligned=self._aligned_bonus_comparison_rows(old_rows,new_rows)
+        aligned=self._aligned_bonus_comparison_rows(old_rows,new_rows,priority_stats=priority_stats)
     old_title="旧" if compact else "旧方案"
     new_title="新" if compact else "新方案"
     old_empty="无已保存配装" if not has_old else ("暂无属性变化" if compact else "暂无可汇总属性")
-    old_column=self._bonus_comparison_column(old_title,aligned,"old",old_empty)
-    new_column=self._bonus_comparison_column(new_title,aligned,"new","暂无属性变化" if compact and not aligned else "暂无可汇总属性")
+    old_column=self._bonus_comparison_column(old_title,aligned,"old",old_empty,priority_stats=priority_stats)
+    new_column=self._bonus_comparison_column(new_title,aligned,"new","暂无属性变化" if compact and not aligned else "暂无可汇总属性",priority_stats=priority_stats)
 
     container=QFrame()
     container.setStyleSheet("QFrame{background:transparent;border:none}")
     layout=QHBoxLayout(container); layout.setContentsMargins(0,0,0,0); layout.setSpacing(8)
     layout.addWidget(old_column,1)
     layout.addWidget(new_column,1)
-    layout.addWidget(self._bonus_delta_column(aligned),1)
+    layout.addWidget(self._bonus_delta_column(aligned,priority_stats=priority_stats),1)
     return container
 
-def _role_bonus_summary_panel(self, role_name, tape, drives, compare_with_saved=False):
+def _role_bonus_summary_panel(self, role_name, tape, drives, compare_with_saved=False, priority_stats=None):
+    priority_stats=list(priority_stats if priority_stats is not None else self._role_stat_priority_stats(role_name))
     if compare_with_saved:
         saved_sources=_diff_saved_sources(self,role_name)
         old_tape,old_drives=_split_loadout_sources(saved_sources)
@@ -789,9 +848,9 @@ def _role_bonus_summary_panel(self, role_name, tape, drives, compare_with_saved=
             title=QLabel("属性汇总")
             title.setStyleSheet("font-size:11px;font-weight:800;color:#8b949e;border:none;background:transparent")
             layout.addWidget(title)
-            layout.addWidget(self._bonus_comparison_widget(role_name,old_rows,new_rows,has_old=True,compact=True))
-            full_rows=self._aligned_bonus_comparison_rows(old_rows,new_rows)
-            changed_rows=self._aligned_bonus_comparison_rows(old_rows,new_rows,changes_only=True)
+            layout.addWidget(self._bonus_comparison_widget(role_name,old_rows,new_rows,has_old=True,compact=True,priority_stats=priority_stats))
+            full_rows=self._aligned_bonus_comparison_rows(old_rows,new_rows,priority_stats=priority_stats)
+            changed_rows=self._aligned_bonus_comparison_rows(old_rows,new_rows,changes_only=True,priority_stats=priority_stats)
             if len(full_rows)>len(changed_rows):
                 more=QPushButton("•••")
                 more.setObjectName("btnSm")
@@ -799,20 +858,21 @@ def _role_bonus_summary_panel(self, role_name, tape, drives, compare_with_saved=
                 more.setCursor(Qt.PointingHandCursor)
                 more.setStyleSheet("QPushButton{background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:8px;font-size:13px;font-weight:800;padding:0}QPushButton:hover{border-color:#58a6ff;color:#58a6ff}")
                 more.clicked.connect(
-                    lambda checked=False,role=role_name,old_r=old_rows,new_r=new_rows: self._show_bonus_comparison_dialog(role,old_r,new_r)
+                    lambda checked=False,role=role_name,old_r=old_rows,new_r=new_rows,stats=list(priority_stats): self._show_bonus_comparison_dialog(role,old_r,new_r,stats)
                 )
                 layout.addWidget(more,0,Qt.AlignCenter)
             layout.addStretch()
             return box
     return self._bonus_summary_widget(role_name,tape,drives)
 
-def _show_bonus_comparison_dialog(self, role_name, old_rows, new_rows):
+def _show_bonus_comparison_dialog(self, role_name, old_rows, new_rows, priority_stats=None):
+    priority_stats=list(priority_stats if priority_stats is not None else self._role_stat_priority_stats(role_name))
     dlg=QDialog(self)
     dlg.setWindowTitle(f"{role_name} 属性汇总对比")
     dlg.setMinimumSize(680,360)
     dlg.setStyleSheet(STYLE)
     layout=QVBoxLayout(dlg); layout.setContentsMargins(14,14,14,14); layout.setSpacing(8)
-    layout.addWidget(self._bonus_comparison_widget(role_name,old_rows,new_rows,has_old=True,compact=False))
+    layout.addWidget(self._bonus_comparison_widget(role_name,old_rows,new_rows,has_old=True,compact=False,priority_stats=priority_stats))
     buttons=QDialogButtonBox(QDialogButtonBox.Ok)
     buttons.accepted.connect(dlg.accept)
     layout.addWidget(buttons)
@@ -845,13 +905,13 @@ def _bonus_summary_widget(self, role_name, tape, drives):
     layout.addStretch()
     return box
 
-def _bonus_row_widget(self, stat, value):
+def _bonus_row_widget(self, stat, value, priority_stats=None):
     row=QFrame()
     row.setFixedHeight(26)
     row.setMinimumWidth(130)
     row.setStyleSheet("QFrame{background:#161b22;border:1px solid #21262d;border-radius:5px;padding:2px 6px}")
     rl=QHBoxLayout(row); rl.setContentsMargins(6,1,6,1); rl.setSpacing(6)
-    name=QLabel(stat); name.setWordWrap(True); name.setStyleSheet("font-size:10px;font-weight:700;color:#c9d1d9;border:none;background:transparent")
+    name=QLabel(stat); name.setWordWrap(True); name.setStyleSheet(_bonus_stat_label_style(stat,priority_stats))
     val=QLabel(self._format_bonus_value(stat,value)); val.setAlignment(Qt.AlignRight|Qt.AlignVCenter)
     val.setStyleSheet("font-size:10px;font-weight:800;color:#f0f6fc;border:none;background:transparent")
     rl.addWidget(name,1); rl.addWidget(val)
