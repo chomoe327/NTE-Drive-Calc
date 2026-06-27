@@ -17,7 +17,7 @@ class NavItem:
 
 NAV_ITEMS = (
     NavItem("execute", "⚡  执行", "btn_exec", "_page_execute"),
-    NavItem("marking", "🗑  盲筛标记", "btn_marking", "_page_marking", "_refresh_marking"),
+    NavItem("marking", "🗑  筛选", "btn_marking", "_page_marking", "_refresh_marking"),
     NavItem("equipment", "💎  配装", "btn_equip", "_page_equipment", "_refresh_equip"),
     NavItem("identify", "🔍  鉴定", "btn_identify", "_page_identify", "_refresh_identify_options"),
     NavItem("blueprint", "📐  图纸", "btn_blueprint", "_page_blueprint", "_refresh_blueprints"),
