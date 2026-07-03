@@ -13,6 +13,12 @@ from src.utils.logger import logger
 from src.utils.perf import log_perf
 
 
+MOVE_HOLD_SECONDS = 0.10
+MOVE_SETTLE_SECONDS = 0.25
+ROW_DOWN_HOLD_SECONDS = 0.15
+ROW_DOWN_SETTLE_SECONDS = 0.30
+
+
 def _save_png(screenshot, filename):
     mss.tools.to_png(screenshot.rgb, screenshot.size, output=filename)
 
@@ -114,19 +120,28 @@ class GamepadScanner:
         logger.info(f"[{counter:04d}] 捕获成功")
         return filename
 
-    def push_left_joystick(self, x, y, *, pace: str = "scan"):
-        if pace == "marking":
-            press_ms, settle_ms = 0.09, 0.18
-        elif pace == "fast":
-            press_ms, settle_ms = 0.05, 0.08
-        else:
-            press_ms, settle_ms = 0.10, 0.30
+    def push_left_joystick(
+        self,
+        x,
+        y,
+        *,
+        pace: str = "scan",
+        hold_seconds: float | None = None,
+        settle_seconds: float | None = None,
+    ):
+        if hold_seconds is None or settle_seconds is None:
+            if pace == "marking":
+                hold_seconds, settle_seconds = 0.09, 0.18
+            elif pace == "fast":
+                hold_seconds, settle_seconds = 0.05, 0.08
+            else:
+                hold_seconds, settle_seconds = MOVE_HOLD_SECONDS, MOVE_SETTLE_SECONDS
         self.gamepad.left_joystick_float(x_value_float=x, y_value_float=y)
         self.gamepad.update()
-        time.sleep(press_ms)
+        time.sleep(hold_seconds)
         self.gamepad.left_joystick_float(x_value_float=0.0, y_value_float=0.0)
         self.gamepad.update()
-        time.sleep(settle_ms)
+        time.sleep(settle_seconds)
 
     def _apply_moves(self, moves, *, pace: str = "scan"):
         for move in moves:
@@ -137,7 +152,15 @@ class GamepadScanner:
             elif move == "L":
                 self.push_left_joystick(-1.0, 0.0, pace=pace)
             elif move == "D":
-                self.push_left_joystick(0.0, -1.0, pace=pace)
+                if pace == "scan":
+                    self.push_left_joystick(
+                        0.0,
+                        -1.0,
+                        hold_seconds=ROW_DOWN_HOLD_SECONDS,
+                        settle_seconds=ROW_DOWN_SETTLE_SECONDS,
+                    )
+                else:
+                    self.push_left_joystick(0.0, -1.0, pace=pace)
             elif move == "U":
                 self.push_left_joystick(0.0, 1.0, pace=pace)
 
