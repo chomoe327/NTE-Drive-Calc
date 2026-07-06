@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import traceback as tb
+import threading
 import time
 
 from PySide6.QtCore import QThread, Signal
@@ -124,12 +125,37 @@ class GamepadScanParseWorkerThread(QThread):
     error = Signal(str)
     scanner_ready = Signal()
     scan_done = Signal(int, int)
+    parse_done = Signal()
+    post_actions_ready = Signal()
     progress = Signal(int, int, str)
 
-    def __init__(self, total_drives, parent=None):
+    def __init__(
+        self,
+        total_drives,
+        parent=None,
+        auto_discard_grade=None,
+        auto_discard_lock_action="skip",
+        post_actions_config=None,
+        selected_roles=None,
+    ):
         super().__init__(parent)
         self.total_drives = total_drives
+        self.auto_discard_grade = auto_discard_grade
+        self.auto_discard_lock_action = auto_discard_lock_action
+        self.post_actions_config = post_actions_config
+        self.selected_roles = list(selected_roles or [])
         self.scanner = None
+        self._post_actions_ready_event = threading.Event()
+
+    def acknowledge_post_actions_ready(self):
+        self._post_actions_ready_event.set()
+
+    def _notify_post_actions_ready(self):
+        self._post_actions_ready_event.clear()
+        self.post_actions_ready.emit()
+        if not self._post_actions_ready_event.wait(timeout=5.0):
+            logger.warning("等待扫描后管理前台切换确认超时，将继续执行状态同步。")
+        time.sleep(1.0)
 
     def run(self):
         worker_start = time.perf_counter()
@@ -162,6 +188,13 @@ class GamepadScanParseWorkerThread(QThread):
                 progress_callback=lambda current, total, filename: self.progress.emit(current, total, filename),
                 cancel_check=lambda: bool(getattr(self.scanner, "_stopped", False)),
                 scan_done_callback=lambda captured, total: self.scan_done.emit(captured, total),
+                parse_done_callback=lambda: self.parse_done.emit(),
+                post_action_ready_callback=self._notify_post_actions_ready,
+                auto_discard_grade=self.auto_discard_grade,
+                auto_discard_lock_action=self.auto_discard_lock_action,
+                post_actions_config=self.post_actions_config,
+                selected_roles=self.selected_roles,
+                config_dir=str(runtime.CONFIG_DIR),
             )
             if int(stats.get("total_count", 0) or 0) != int(self.total_drives):
                 raise RuntimeError("全量扫描未完整结束，流水线解析结果未写入库存。")

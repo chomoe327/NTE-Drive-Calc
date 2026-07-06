@@ -46,6 +46,74 @@ class UsageGuideWorkflowTests(unittest.TestCase):
         app.processEvents()
 
 
+class IdentifyTempFileWorkflowTests(unittest.TestCase):
+    def test_identify_clipboard_cleanup_removes_only_generated_account_root_files(self):
+        from src.features.identification.temp_files import (
+            cleanup_identify_clipboard_files,
+            iter_identify_clipboard_files,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            generated = root / "identify_clipboard_123.png"
+            other_png = root / "other.png"
+            nested = root / "nested"
+            nested.mkdir()
+            nested_generated = nested / "identify_clipboard_456.png"
+            for path in (generated, other_png, nested_generated):
+                path.write_bytes(b"png")
+
+            self.assertEqual([generated], iter_identify_clipboard_files(root))
+            removed = cleanup_identify_clipboard_files([generated, other_png, nested_generated], root)
+
+            self.assertEqual(1, removed)
+            self.assertFalse(generated.exists())
+            self.assertTrue(other_png.exists())
+            self.assertTrue(nested_generated.exists())
+
+    def test_identify_finished_cleans_pending_clipboard_paths_from_input(self):
+        from src.app import runtime
+        from src.features.identification import controller
+
+        class PathEdit:
+            def __init__(self, text):
+                self.value = text
+
+            def setText(self, text):
+                self.value = text
+
+            def text(self):
+                return self.value
+
+        class Window:
+            def __init__(self, text):
+                self.ident_path_edit = PathEdit(text)
+                self._pending_identify_clipboard_cleanup = []
+
+            def _identify_paths_from_text(self):
+                return controller.parse_identify_paths(self.ident_path_edit.text())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old_root = getattr(runtime, "ACCOUNT_DATA_ROOT", None)
+            root = Path(tmp)
+            runtime.ACCOUNT_DATA_ROOT = root
+            generated = root / "identify_clipboard_123.png"
+            selected = root / "manual.png"
+            generated.write_bytes(b"png")
+            selected.write_bytes(b"png")
+            window = Window(f"{generated};{selected}")
+            window._pending_identify_clipboard_cleanup = [generated]
+            try:
+                controller._cleanup_pending_identify_clipboard_files(window)
+            finally:
+                if old_root is not None:
+                    runtime.ACCOUNT_DATA_ROOT = old_root
+
+            self.assertFalse(generated.exists())
+            self.assertTrue(selected.exists())
+            self.assertEqual(str(selected), window.ident_path_edit.text())
+
+
 class RolePriorityWorkflowTests(unittest.TestCase):
     def test_stat_choice_resolution_prefers_exact_current_data(self):
         from src.features.allocation.role_selector import resolve_priority_choice
@@ -355,6 +423,188 @@ class ExecutePageWorkflowTests(unittest.TestCase):
         self.assertNotIn("一键导入", [button.text() for button in window.result_card.findChildren(QPushButton)])
         self.assertIsNotNone(scroll)
         app.processEvents()
+
+    def test_execute_page_shows_post_action_manager_only_for_full_scan(self):
+        from PySide6.QtCore import Signal
+        from PySide6.QtWidgets import QApplication, QFrame, QVBoxLayout, QWidget
+
+        from src.features.allocation.execute_page import build_execute_page
+        from src.features.scanning.controller import _on_scan_change
+
+        app = QApplication.instance() or QApplication([])
+
+        class FakeRoleSelector(QWidget):
+            orderChanged = Signal()
+
+        class Window(QWidget):
+            def _card(self, _title):
+                card = QFrame()
+                QVBoxLayout(card)
+                return card
+
+            def _on_scan_change(self, scan_id):
+                _on_scan_change(self, scan_id)
+
+            def _on_priority_changed(self, *_args):
+                pass
+
+            def _do_exec(self):
+                pass
+
+            def _save_alloc(self, show_message=True):
+                return True
+
+        window = Window()
+        help_calls = []
+        scroll = build_execute_page(window, FakeRoleSelector, {}, {}, {}, lambda *args: help_calls.append(args))
+
+        self.assertEqual("管理", window.scan_post_action_btn.text())
+        self.assertTrue(window.total_count_frame.isHidden())
+
+        window._on_scan_change(1)
+        self.assertFalse(window.total_count_frame.isHidden())
+        self.assertTrue(window.scan_post_action_btn.isEnabled())
+
+        window._on_scan_change(4)
+        self.assertTrue(window.total_count_frame.isHidden())
+        self.assertIsNotNone(scroll)
+        self.assertEqual([], help_calls)
+        app.processEvents()
+
+    def test_scan_post_action_defaults_match_plan(self):
+        from src.features.scanning.post_action_dialog import load_scan_post_action_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = load_scan_post_action_config(Path(tmp))
+
+        self.assertFalse(config["discard"]["enabled"])
+        self.assertEqual("S", config["discard"]["grade"])
+        self.assertEqual("all", config["discard"]["role_scope"])
+        self.assertEqual("gold_purple", config["discard"]["quality_scope"])
+        self.assertEqual("all", config["discard"]["type_scope"])
+        self.assertIsNone(config["discard"]["shape_ids"])
+        self.assertIsNone(config["discard"]["set_names"])
+        self.assertEqual("skip", config["discard"]["on_locked"])
+        self.assertEqual("normal", config["discard"]["on_discarded"])
+        self.assertFalse(config["lock"]["enabled"])
+        self.assertEqual("SSS", config["lock"]["grade"])
+        self.assertEqual("all", config["lock"]["role_scope"])
+        self.assertEqual("gold_purple", config["lock"]["quality_scope"])
+        self.assertEqual("all", config["lock"]["type_scope"])
+        self.assertIsNone(config["lock"]["shape_ids"])
+        self.assertIsNone(config["lock"]["set_names"])
+        self.assertEqual("skip", config["lock"]["on_locked"])
+        self.assertEqual("normal", config["lock"]["on_discarded"])
+
+    def test_scan_post_action_dialog_uses_side_by_side_toggle_buttons_and_help(self):
+        from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton
+
+        from src.features.scanning.post_action_dialog import ScanPostActionDialog
+
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp:
+            dialog = ScanPostActionDialog(None, Path(tmp))
+
+            group_titles = [group.title() for group in dialog.findChildren(QGroupBox)]
+            self.assertEqual([], group_titles)
+            help_buttons = [button for button in dialog.findChildren(QPushButton) if button.text() == "?"]
+            self.assertEqual(2, len(help_buttons))
+            buttons = [button for button in dialog.findChildren(QPushButton) if button.isCheckable()]
+            self.assertEqual(["关闭", "关闭"], [button.text() for button in buttons])
+            self.assertIn("da3633", buttons[0].styleSheet())
+
+            buttons[0].setChecked(True)
+
+            self.assertEqual("开启", buttons[0].text())
+            self.assertIn("238636", buttons[0].styleSheet())
+            self.assertEqual(
+                ["驱动 10/12，卡带 11/12", "驱动 10/12，卡带 11/12"],
+                [label.text() for label in dialog.findChildren(QLabel) if label.text().startswith("驱动 ")],
+            )
+        app.processEvents()
+
+    def test_scan_post_action_config_passes_to_full_scan(self):
+        from src.features.scanning import controller
+        from src.storage.json_store import write_json
+        from src.app import runtime
+
+        original_information = controller.QMessageBox.information
+        controller.QMessageBox.information = lambda *_args, **_kwargs: None
+        try:
+            class RoleSelector:
+                def get_selected(self):
+                    return []
+
+                def get_custom_sets(self):
+                    return {}
+
+                def get_tape_main_filters(self):
+                    return {}
+
+                def get_crit_priority_modes(self):
+                    return {}
+
+                def get_crit_rate_caps(self):
+                    return {}
+
+                def get_set_effect_modes(self):
+                    return {}
+
+                def get_priority_groups(self):
+                    return None
+
+            class ScanGroup:
+                def checkedId(self):
+                    return 1
+
+            class CountEdit:
+                def text(self):
+                    return "10"
+
+            class Window:
+                def __init__(self):
+                    self.role_selector = RoleSelector()
+                    self.scan_group = ScanGroup()
+                    self.total_count_edit = CountEdit()
+                    self.strategy_group = SimpleNamespace(checkedId=lambda: 0)
+                    self.btn_run = SimpleNamespace(setEnabled=lambda _value: None, setText=lambda _text: None)
+                    self.result_card = SimpleNamespace(setVisible=lambda _value: None)
+                    self.scan_args = []
+
+                def _start_gamepad_scan(
+                    self,
+                    total_drives,
+                    auto_discard_grade=None,
+                    auto_discard_lock_action="skip",
+                    post_actions_config=None,
+                    selected_roles=None,
+                ):
+                    self.scan_args.append((total_drives, post_actions_config, selected_roles))
+
+                def _confirm_unsaved_allocation_before_recompute(self):
+                    return True
+
+            with tempfile.TemporaryDirectory() as tmp:
+                runtime.USER_CONFIG_DIR = Path(tmp)
+                write_json(
+                    Path(tmp) / "scan_post_actions.json",
+                    {
+                        "discard": {"enabled": True, "grade": "SS"},
+                        "lock": {"enabled": True, "grade": "SSS"},
+                    },
+                )
+                window = Window()
+                controller._do_exec(window)
+        finally:
+            controller.QMessageBox.information = original_information
+
+        total, config, selected_roles = window.scan_args[0]
+        self.assertEqual(10, total)
+        self.assertTrue(config["discard"]["enabled"])
+        self.assertEqual("SS", config["discard"]["grade"])
+        self.assertTrue(config["lock"]["enabled"])
+        self.assertEqual("SSS", config["lock"]["grade"])
+        self.assertEqual([], selected_roles)
 
     def test_result_header_grade_uses_full_350_score_even_without_tape(self):
         from PySide6.QtWidgets import QApplication, QFrame, QVBoxLayout
@@ -2491,5 +2741,3 @@ class ExecutePageWorkflowTests(unittest.TestCase):
 
         self.assertIn((150.8, 35), captured)
         self.assertNotIn((150.8, 20), captured)
-
-
