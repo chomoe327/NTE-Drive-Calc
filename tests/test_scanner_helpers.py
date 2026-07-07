@@ -735,7 +735,7 @@ class InventoryAssemblyShapeTests(unittest.TestCase):
             self.skipTest("assembly debug screenshot not available")
 
         from src.features.inventory_import.equipment_classifier import locate_selected_inventory_shape
-        from src.scanner.shape_recognizer import ShapeRecognizer
+        from src.scanner.shape_recognizer import GoldShapeRecognizer
 
         img = cv2.imread(str(asset))
         self.assertIsNotNone(img)
@@ -746,10 +746,15 @@ class InventoryAssemblyShapeTests(unittest.TestCase):
             int(620 * width / 2560),
             int(1020 * height / 1440),
         )
-        recognizer = ShapeRecognizer(template_dir="config/templates")
-        result = locate_selected_inventory_shape(recognizer, img, panel)
+        recognizer = GoldShapeRecognizer(template_dir="config/templates")
+        result = locate_selected_inventory_shape(
+            {"H_2": recognizer.templates["H_2"]},
+            img,
+            panel,
+            min_margin=0.0,
+        )
         self.assertEqual("H_2", result["shape_id"])
-        self.assertGreaterEqual(result["confidence"], 0.58)
+        self.assertGreaterEqual(result["confidence"], 0.65)
         self.assertIn("selection_box", result)
 
 

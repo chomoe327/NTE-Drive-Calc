@@ -39,7 +39,11 @@ class GamepadAssemblyTests(unittest.TestCase):
             "inventory_search": {
                 "max_steps": 4,
                 "grid_columns": 4,
-                "min_confidence": 0.58,
+                "min_confidence": 0.65,
+                "min_margin": 0.05,
+            },
+            "position_correction": {
+                "enabled": False,
             },
             "drag_moves": [
                 {"label": "01_right", "stick_x": 0.95, "stick_y": 0.0, "duration_seconds": 0.02},
@@ -151,14 +155,16 @@ class GamepadAssemblyTests(unittest.TestCase):
             controller = GamepadAssemblyController(calibration=self.calibration)
             controller.capture_screenshot = MagicMock(return_value="debug.png")
             controller.select_inventory_drive_by_shape = MagicMock(
-                return_value={"shape_id": "H_2", "confidence": 0.95}
+                return_value={"shape_id": "H_2", "confidence": 0.95, "margin": 0.12}
             )
+            controller._correct_drag_position = MagicMock(return_value=[])
             moves = controller.drag_to_grid_cell(1, 0, piece_id="H_2")
 
         self.assertEqual(2, len(moves))
         self.assertNotIn(fake_button, fake_gamepad.pressed)
         self.assertEqual((0.0, 0.0), fake_gamepad.left_stick)
         controller.select_inventory_drive_by_shape.assert_called_once_with("H_2")
+        controller._correct_drag_position.assert_called_once_with("H_2", 1, 0)
 
 
 if __name__ == "__main__":

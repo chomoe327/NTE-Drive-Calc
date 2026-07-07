@@ -15,9 +15,17 @@ import numpy as np
 
 from src.app import runtime
 from src.features.inventory_import.equipment_classifier import locate_selected_inventory_shape
+from src.scanner.assembly_vision import (
+    assembly_board_region,
+    compute_position_error,
+    correction_stick_for_error,
+    detect_dragged_piece_anchor,
+    grid_dimensions,
+    needs_position_correction,
+)
 from src.scanner.config import ScannerConfig
 from src.scanner.gamepad_controller import ViGEmDriverNotReadyError, _format_vigem_error
-from src.scanner.shape_recognizer import ShapeRecognizer
+from src.scanner.shape_recognizer import GoldShapeRecognizer
 from src.scanner.window_capture import capture_foreground_window, get_foreground_client_rect
 from src.utils.logger import logger
 
@@ -75,7 +83,7 @@ class GamepadAssemblyController:
         self._debug_enabled = bool(self._debug_cfg.get("enabled", True))
         self._debug_screenshots: list[str] = []
         self._debug_counter = 0
-        self._shape_recognizer: ShapeRecognizer | None = None
+        self._shape_recognizer: GoldShapeRecognizer | None = None
         logger.info("正在连接虚拟 Xbox 360 手柄（装配测试）...")
         try:
             import vgamepad as vg
@@ -144,10 +152,13 @@ class GamepadAssemblyController:
         down_stick_y = float(nav.get("down_stick_y", -1.0) or -1.0)
         self._tap_left_stick(0.0, down_stick_y)
 
-    def _get_shape_recognizer(self) -> ShapeRecognizer:
+    def _position_correction_cfg(self) -> dict:
+        return self.calibration.get("position_correction", {}) or {}
+
+    def _get_shape_recognizer(self) -> GoldShapeRecognizer:
         if self._shape_recognizer is None:
             template_dir = str(runtime.TEMPLATE_DIR or runtime.CONFIG_DIR / "templates")
-            self._shape_recognizer = ShapeRecognizer(template_dir=template_dir)
+            self._shape_recognizer = GoldShapeRecognizer(template_dir=template_dir)
         return self._shape_recognizer
 
     def _capture_foreground_bgr(self) -> np.ndarray:
@@ -166,28 +177,40 @@ class GamepadAssemblyController:
         _, regions = profiles[0]
         return regions["inventory_panel"]
 
-    def _recognize_selected_drive_shape(self) -> dict:
+    def _recognize_selected_drive_shape(self, shape_id: str | None = None) -> dict:
         image = self._capture_foreground_bgr()
         search_cfg = self._inventory_search_cfg()
-        min_confidence = float(search_cfg.get("min_confidence", 0.58) or 0.58)
+        min_confidence = float(search_cfg.get("min_confidence", 0.65) or 0.65)
+        min_margin = float(search_cfg.get("min_margin", 0.05) or 0.05)
         panel_region = self._inventory_panel_region()
+        recognizer = self._get_shape_recognizer()
+        candidate_ids = [shape_id] if shape_id else None
+        templates = recognizer.templates
+        if candidate_ids is not None:
+            templates = {
+                sid: templates[sid]
+                for sid in candidate_ids
+                if sid in templates
+            }
         result = locate_selected_inventory_shape(
-            self._get_shape_recognizer(),
+            templates,
             image,
             panel_region,
             min_confidence=min_confidence,
+            min_margin=0.0 if candidate_ids else min_margin,
         )
         if result.get("selection_box"):
             x1, y1, x2, y2 = result["selection_box"]
             logger.debug(
                 f"库存选中框: ({x1}, {y1})-({x2}, {y2}) "
-                f"matrix={result.get('matrix_size')}"
+                f"margin={result.get('margin')} "
+                f"second={result.get('second_best_confidence')}"
             )
         return result
 
     def _selection_matches_target(self, shape_id: str, recognition: dict) -> bool:
         search_cfg = self._inventory_search_cfg()
-        min_confidence = float(search_cfg.get("min_confidence", 0.58) or 0.58)
+        min_confidence = float(search_cfg.get("min_confidence", 0.65) or 0.65)
         detected = str(recognition.get("shape_id") or "Unknown")
         confidence = float(recognition.get("confidence") or -1.0)
         return detected == shape_id and confidence >= min_confidence
@@ -220,10 +243,11 @@ class GamepadAssemblyController:
         grid_columns = max(1, int(search_cfg.get("grid_columns", 4) or 4))
 
         self._wake_gamepad()
-        recognition = self._recognize_selected_drive_shape()
+        recognition = self._recognize_selected_drive_shape(shape_id)
         logger.info(
             f"库存形状识别: shape={recognition.get('shape_id')} "
-            f"confidence={recognition.get('confidence')}"
+            f"confidence={recognition.get('confidence')} "
+            f"margin={recognition.get('margin')}"
         )
         if self._selection_matches_target(shape_id, recognition):
             logger.info(f"当前选中驱动已是目标形状 {shape_id}，无需继续搜索。")
@@ -238,10 +262,11 @@ class GamepadAssemblyController:
                 logger.info(f"  [库存搜索 {step}/{max_steps}] 右移一格")
                 self._tap_inventory_right()
 
-            recognition = self._recognize_selected_drive_shape()
+            recognition = self._recognize_selected_drive_shape(shape_id)
             logger.info(
                 f"  识别结果: shape={recognition.get('shape_id')} "
-                f"confidence={recognition.get('confidence')}"
+                f"confidence={recognition.get('confidence')} "
+                f"margin={recognition.get('margin')}"
             )
             if self._selection_matches_target(shape_id, recognition):
                 logger.success(f"已找到目标形状 {shape_id}。")
@@ -385,14 +410,72 @@ class GamepadAssemblyController:
             )
         return moves
 
+    def _detect_piece_position(self, piece_id: str) -> dict:
+        image = self._capture_foreground_bgr()
+        board_region = assembly_board_region(self.calibration)
+        grid_rows, grid_cols = grid_dimensions(self.calibration)
+        correction_cfg = self._position_correction_cfg()
+        min_confidence = float(correction_cfg.get("min_match_confidence", 0.50) or 0.50)
+        return detect_dragged_piece_anchor(
+            image,
+            piece_id,
+            self._get_shape_recognizer().templates,
+            board_region,
+            grid_rows=grid_rows,
+            grid_cols=grid_cols,
+            min_confidence=min_confidence,
+        )
+
+    def _correct_drag_position(self, piece_id: str, target_r: int, target_c: int) -> list[StickMove]:
+        correction_cfg = self._position_correction_cfg()
+        if not correction_cfg.get("enabled", True):
+            return []
+
+        max_iterations = max(1, int(correction_cfg.get("max_iterations", 10) or 10))
+        max_cell_error = float(correction_cfg.get("max_cell_error", 0.45) or 0.45)
+        corrections: list[StickMove] = []
+
+        for iteration in range(1, max_iterations + 1):
+            detection = self._detect_piece_position(piece_id)
+            detected_r = detection.get("anchor_r")
+            detected_c = detection.get("anchor_c")
+            delta_r, delta_c = compute_position_error(detected_r, detected_c, target_r, target_c)
+            logger.info(
+                f"  [位置校正 {iteration}/{max_iterations}] "
+                f"检测=({detected_r}, {detected_c}) 目标=({target_r}, {target_c}) "
+                f"误差=(Δr={delta_r:.2f}, Δc={delta_c:.2f}) "
+                f"conf={detection.get('confidence')}"
+            )
+            if not needs_position_correction(delta_r, delta_c, max_cell_error=max_cell_error):
+                logger.success("拖动位置已接近目标格，停止校正。")
+                break
+
+            stick_x, stick_y, duration = correction_stick_for_error(delta_r, delta_c, correction_cfg)
+            move = StickMove(
+                stick_x=stick_x,
+                stick_y=stick_y,
+                duration_seconds=duration,
+                label=f"correct_{iteration:02d}",
+            )
+            corrections.append(move)
+            logger.info(
+                f"  发送校正摇杆: stick=({stick_x:.3f}, {stick_y:.3f}) duration={duration:.2f}s"
+            )
+            self._move_stick_while_holding(move)
+        else:
+            logger.warning("位置校正达到最大次数，仍将尝试放置。")
+
+        return corrections
+
     def drag_to_grid_cell(self, start_r: int, start_c: int, piece_id: str = "H_2") -> list[StickMove]:
         moves = self._moves_from_config_list(start_r, start_c)
         logger.info(
-            f"开始拖动到网格 ({start_r}, {start_c})，共 {len(moves)} 段摇杆动作。"
+            f"开始拖动到网格 ({start_r}, {start_c})，共 {len(moves)} 段初始摇杆动作。"
         )
 
         self.select_inventory_drive_by_shape(piece_id)
         self._begin_drag_hold()
+        applied_moves: list[StickMove] = []
         try:
             for index, move in enumerate(moves, 1):
                 logger.info(
@@ -401,11 +484,18 @@ class GamepadAssemblyController:
                     f"duration={move.duration_seconds:.2f}s"
                 )
                 self._move_stick_while_holding(move)
+                applied_moves.append(move)
+
+                correction_cfg = self._position_correction_cfg()
+                if correction_cfg.get("correct_after_each_move", False):
+                    applied_moves.extend(self._correct_drag_position(piece_id, start_r, start_c))
+
+            applied_moves.extend(self._correct_drag_position(piece_id, start_r, start_c))
         finally:
             if self._drag_active:
                 self._finish_drag_hold()
 
-        return moves
+        return applied_moves
 
 
 def run_assembly_drag_test(

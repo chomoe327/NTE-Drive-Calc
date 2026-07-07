@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import os
 import time
-from functools import lru_cache
 
 import cv2
 import numpy as np
@@ -16,23 +15,89 @@ from src.utils.perf import log_perf
 
 
 HIGH_CONFIDENCE_DRIVE_SHAPE = 0.95
-INVENTORY_SLOT_MIN_CONFIDENCE = 0.58
+INVENTORY_SLOT_MIN_CONFIDENCE = 0.65
+INVENTORY_SLOT_MIN_MARGIN = 0.05
 
 
-@lru_cache(maxsize=4)
-def _load_shape_matrices(config_dir: str) -> dict[str, np.ndarray]:
-    shapes_path = os.path.join(config_dir, "shapes.json")
-    if not os.path.exists(shapes_path):
-        return {}
-    with open(shapes_path, "r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    matrices: dict[str, np.ndarray] = {}
-    for item in data.get("shapes", []):
-        shape_id = item.get("shape_id")
-        matrix = item.get("matrix")
-        if shape_id and shape_id != "TAPE_15" and matrix:
-            matrices[str(shape_id)] = np.array(matrix, dtype=int)
-    return matrices
+def match_shape_templates_in_crop(
+    crop_bgr: np.ndarray,
+    templates: dict[str, np.ndarray],
+    *,
+    min_confidence: float = INVENTORY_SLOT_MIN_CONFIDENCE,
+    min_margin: float = INVENTORY_SLOT_MIN_MARGIN,
+    scale_hint: tuple[int, int] | None = None,
+) -> dict:
+    if crop_bgr is None or crop_bgr.size == 0 or not templates:
+        return {
+            "shape_id": "Unknown",
+            "confidence": -1.0,
+            "second_best_confidence": -1.0,
+            "margin": 0.0,
+            "match_top_left": None,
+            "match_size": None,
+        }
+
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if len(crop_bgr.shape) == 3 else crop_bgr
+    crop_h, crop_w = gray.shape[:2]
+    if scale_hint is None:
+        sample = next(iter(templates.values()))
+        scale_hint = sample.shape[1], sample.shape[0]
+    base_scale = max(min(crop_w / max(1, scale_hint[0]), crop_h / max(1, scale_hint[1])) * 0.92, 0.12)
+    scales = sorted({round(base_scale + delta, 2) for delta in (-0.10, -0.06, -0.03, 0.0, 0.03, 0.06, 0.10)})
+
+    scores: list[tuple[float, str, tuple[int, int, int, int]]] = []
+    for shape_id, template in templates.items():
+        template_h, template_w = template.shape[:2]
+        best_for_shape = -1.0
+        best_loc = (0, 0)
+        best_size = (template_w, template_h)
+        for scale in scales:
+            resized_w = int(template_w * scale)
+            resized_h = int(template_h * scale)
+            if resized_w < 8 or resized_h < 8 or resized_w > crop_w or resized_h > crop_h:
+                continue
+            resized = cv2.resize(template, (resized_w, resized_h))
+            result = cv2.matchTemplate(gray, resized, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+            if max_val > best_for_shape:
+                best_for_shape = float(max_val)
+                best_loc = max_loc
+                best_size = (resized_w, resized_h)
+        scores.append((best_for_shape, shape_id, (best_loc[0], best_loc[1], best_size[0], best_size[1])))
+
+    scores.sort(reverse=True, key=lambda item: item[0])
+    if not scores or scores[0][0] < min_confidence:
+        best_score = scores[0][0] if scores else -1.0
+        return {
+            "shape_id": "Unknown",
+            "confidence": round(best_score, 2),
+            "second_best_confidence": round(scores[1][0], 2) if len(scores) > 1 else -1.0,
+            "margin": 0.0,
+            "match_top_left": None,
+            "match_size": None,
+        }
+
+    best_score, best_shape, (match_x, match_y, match_w, match_h) = scores[0]
+    second_score = scores[1][0] if len(scores) > 1 else -1.0
+    margin = best_score - second_score if second_score >= 0 else best_score
+    if margin < min_margin:
+        return {
+            "shape_id": "Unknown",
+            "confidence": round(best_score, 2),
+            "second_best_confidence": round(second_score, 2),
+            "margin": round(margin, 2),
+            "match_top_left": (match_x, match_y),
+            "match_size": (match_w, match_h),
+        }
+
+    return {
+        "shape_id": best_shape,
+        "confidence": round(best_score, 2),
+        "second_best_confidence": round(second_score, 2),
+        "margin": round(margin, 2),
+        "match_top_left": (match_x, match_y),
+        "match_size": (match_w, match_h),
+    }
 
 
 def _selection_highlight_mask(hsv_img: np.ndarray) -> np.ndarray:
@@ -94,103 +159,36 @@ def _find_inventory_selection_box(
     return best_box
 
 
-def _estimate_shape_matrix_size(aspect: float) -> tuple[int, int]:
-    if aspect >= 1.05:
-        return 1, max(2, round(aspect * 1.05))
-    if aspect <= 0.95:
-        return max(2, round((1 / max(aspect, 1e-6)) * 1.05)), 1
-    return 2, 2
-
-
-def _slot_orange_bbox(slot_crop: np.ndarray) -> tuple[float, tuple[int, int, int, int] | None]:
-    if slot_crop is None or slot_crop.size == 0:
-        return 1.0, None
-    h, w = slot_crop.shape[:2]
-    inner = slot_crop[int(h * 0.12) : int(h * 0.88), int(w * 0.05) : int(w * 0.95)]
-    if inner.size == 0:
-        return 1.0, None
-    hsv = cv2.cvtColor(inner, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, np.array([10, 120, 140]), np.array([35, 255, 255]))
-    coords = np.column_stack(np.where(mask > 0))
-    if coords.size == 0:
-        return 1.0, None
-    y1, x1 = coords.min(axis=0)
-    y2, x2 = coords.max(axis=0)
-    box_w = int(x2 - x1 + 1)
-    box_h = int(y2 - y1 + 1)
-    return box_w / max(box_h, 1), (int(x1), int(y1), int(x2 + 1), int(y2 + 1))
-
-
 def locate_shape_in_slot_crop(
-    shape_recognizer,
+    gold_templates: dict[str, np.ndarray],
     slot_crop: np.ndarray,
     *,
     candidate_shape_ids: list[str] | None = None,
     min_confidence: float = INVENTORY_SLOT_MIN_CONFIDENCE,
+    min_margin: float = INVENTORY_SLOT_MIN_MARGIN,
 ) -> dict:
-    if slot_crop is None or slot_crop.size == 0:
-        return {"shape_id": "Unknown", "confidence": -1.0}
-
-    aspect, _orange_box = _slot_orange_bbox(slot_crop)
-    est_rows, est_cols = _estimate_shape_matrix_size(aspect)
-    config_dir = os.path.dirname(getattr(shape_recognizer, "template_dir", "config/templates"))
-    shape_matrices = _load_shape_matrices(config_dir)
-
-    if candidate_shape_ids is None:
-        candidate_shape_ids = [
-            shape_id
-            for shape_id, matrix in shape_matrices.items()
-            if matrix.shape == (est_rows, est_cols)
-        ]
-    else:
-        candidate_shape_ids = [
-            shape_id
+    templates = gold_templates
+    if candidate_shape_ids is not None:
+        templates = {
+            shape_id: gold_templates[shape_id]
             for shape_id in candidate_shape_ids
-            if shape_id in shape_matrices and shape_matrices[shape_id].shape == (est_rows, est_cols)
-        ]
-
-    if not candidate_shape_ids:
-        return {"shape_id": "Unknown", "confidence": -1.0, "matrix_size": (est_rows, est_cols)}
-
-    gray = cv2.cvtColor(slot_crop, cv2.COLOR_BGR2GRAY) if len(slot_crop.shape) == 3 else slot_crop
-    slot_h, slot_w = gray.shape[:2]
-    base_scale = max(min(slot_w / 250.0, slot_h / 240.0) * 0.95, 0.08)
-    scales = sorted({round(base_scale + delta, 2) for delta in (-0.08, -0.05, -0.03, 0.0, 0.03, 0.05, 0.08)})
-
-    best_shape = "Unknown"
-    best_score = -1.0
-    for shape_id in candidate_shape_ids:
-        template = shape_recognizer.templates.get(shape_id)
-        if template is None:
-            continue
-        template_h, template_w = template.shape[:2]
-        for scale in scales:
-            resized_w = int(template_w * scale)
-            resized_h = int(template_h * scale)
-            if resized_w < 6 or resized_h < 6 or resized_w > slot_w or resized_h > slot_h:
-                continue
-            resized = cv2.resize(template, (resized_w, resized_h))
-            result = cv2.matchTemplate(gray, resized, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, _ = cv2.minMaxLoc(result)
-            if max_val > best_score:
-                best_score = float(max_val)
-                best_shape = shape_id
-
-    if best_score < min_confidence:
-        best_shape = "Unknown"
-    return {
-        "shape_id": best_shape,
-        "confidence": round(best_score, 2),
-        "matrix_size": (est_rows, est_cols),
-    }
+            if shape_id in gold_templates
+        }
+    return match_shape_templates_in_crop(
+        slot_crop,
+        templates,
+        min_confidence=min_confidence,
+        min_margin=min_margin,
+    )
 
 
 def locate_selected_inventory_shape(
-    shape_recognizer,
+    gold_templates: dict[str, np.ndarray],
     img: np.ndarray,
     panel_region: tuple[int, int, int, int] | None = None,
     *,
     min_confidence: float = INVENTORY_SLOT_MIN_CONFIDENCE,
+    min_margin: float = INVENTORY_SLOT_MIN_MARGIN,
 ) -> dict:
     """Detect the highlighted inventory slot and recognize the drive shape inside it."""
     selection_box = _find_inventory_selection_box(img, panel_region)
@@ -200,9 +198,10 @@ def locate_selected_inventory_shape(
     x1, y1, x2, y2 = selection_box
     slot_crop = img[y1:y2, x1:x2]
     result = locate_shape_in_slot_crop(
-        shape_recognizer,
+        gold_templates,
         slot_crop,
         min_confidence=min_confidence,
+        min_margin=min_margin,
     )
     result["selection_box"] = selection_box
     return result
