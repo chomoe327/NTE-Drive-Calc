@@ -43,7 +43,12 @@ def match_shape_templates_in_crop(
         sample = next(iter(templates.values()))
         scale_hint = sample.shape[1], sample.shape[0]
     base_scale = max(min(crop_w / max(1, scale_hint[0]), crop_h / max(1, scale_hint[1])), 0.12)
-    scales = sorted({round(base_scale + delta, 2) for delta in (-0.10, -0.06, -0.03, 0.0, 0.03, 0.06, 0.10)})
+    scales = sorted(
+        {
+            round(max(0.18, base_scale + delta), 2)
+            for delta in (-0.15, -0.10, -0.06, -0.03, 0.0, 0.03, 0.06, 0.10, 0.15)
+        }
+    )
 
     scores: list[tuple[float, str, tuple[int, int, int, int]]] = []
     for shape_id, template in templates.items():
@@ -116,6 +121,7 @@ def build_inventory_grid_layout(
     *,
     base_width: int = 2560,
     base_height: int = 1440,
+    content_rect: tuple[int, int, int, int] | None = None,
 ) -> dict:
     """Scale the inventory slot grid from 2K calibration coordinates."""
     from src.scanner.window_capture import scale_region
@@ -130,8 +136,20 @@ def build_inventory_grid_layout(
     rows = max(1, int(cfg.get("grid_rows", 5) or 5))
     base_size = (base_width, base_height)
 
-    scaled_origin = scale_region((origin_x, origin_y, origin_x, origin_y), target_width, target_height, base_size)
-    scaled_cell = scale_region((0, 0, cell_w, cell_h), target_width, target_height, base_size)
+    scaled_origin = scale_region(
+        (origin_x, origin_y, origin_x, origin_y),
+        target_width,
+        target_height,
+        base_size,
+        content_rect=content_rect,
+    )
+    scaled_cell = scale_region(
+        (0, 0, cell_w, cell_h),
+        target_width,
+        target_height,
+        base_size,
+        content_rect=content_rect,
+    )
     cell_width = max(1, scaled_cell[2] - scaled_cell[0])
     cell_height = max(1, scaled_cell[3] - scaled_cell[1])
 
@@ -165,20 +183,101 @@ def load_inventory_selection_triangle(template_path: str | os.PathLike[str]) -> 
     return image
 
 
+def _grid_triangle_search_region(
+    grid_layout: dict,
+    panel_region: tuple[int, int, int, int],
+    image_width: int,
+    image_height: int,
+) -> tuple[int, int, int, int]:
+    """Limit triangle matching to the inventory grid band inside the panel."""
+    origin_x = int(grid_layout["origin_x"])
+    origin_y = int(grid_layout["origin_y"])
+    cell_width = int(grid_layout["cell_width"])
+    cell_height = int(grid_layout["cell_height"])
+    columns = int(grid_layout["grid_columns"])
+    rows = int(grid_layout["grid_rows"])
+
+    pad_x = max(4, int(cell_width * 0.15))
+    pad_top = max(4, int(cell_height * 0.35))
+    pad_bottom = max(4, int(cell_height * 0.10))
+    x1 = max(0, origin_x - pad_x)
+    y1 = max(0, origin_y - pad_top)
+    x2 = min(image_width, origin_x + columns * cell_width + pad_x)
+    y2 = min(image_height, origin_y + rows * cell_height + pad_bottom)
+
+    px1, py1, px2, py2 = panel_region
+    return (
+        max(x1, px1),
+        max(y1, py1),
+        min(x2, px2),
+        min(y2, py2),
+    )
+
+
+def _selection_box_from_triangle(
+    triangle_match: dict,
+    grid_layout: dict,
+    image_width: int,
+    image_height: int,
+) -> tuple[int, int, int, int]:
+    """Build the full slot crop directly below the matched selection triangle."""
+    cell_width = int(grid_layout["cell_width"])
+    cell_height = int(grid_layout["cell_height"])
+    center_x = int(triangle_match["center_x"])
+    y1 = int(triangle_match["bottom_y"])
+    x1 = int(round(center_x - cell_width / 2))
+    y2 = y1 + cell_height
+    x2 = x1 + cell_width
+
+    if x1 < 0:
+        x1 = 0
+        x2 = min(image_width, cell_width)
+    if x2 > image_width:
+        x2 = image_width
+        x1 = max(0, x2 - cell_width)
+    if y1 < 0:
+        y1 = 0
+        y2 = min(image_height, cell_height)
+    if y2 > image_height:
+        y2 = image_height
+        y1 = max(0, y2 - cell_height)
+
+    return x1, y1, x2, y2
+
+
+def _triangle_match_is_plausible(triangle_match: dict, grid_layout: dict) -> bool:
+    origin_x = float(grid_layout["origin_x"])
+    origin_y = float(grid_layout["origin_y"])
+    cell_width = float(grid_layout["cell_width"])
+    cell_height = float(grid_layout["cell_height"])
+    columns = int(grid_layout["grid_columns"])
+    rows = int(grid_layout["grid_rows"])
+
+    center_x = float(triangle_match["center_x"])
+    bottom_y = float(triangle_match["bottom_y"])
+    grid_right = origin_x + columns * cell_width
+    grid_bottom = origin_y + rows * cell_height
+    return (
+        origin_x - cell_width * 0.35 <= center_x <= grid_right + cell_width * 0.35
+        and origin_y - cell_height * 0.35 <= bottom_y <= grid_bottom + cell_height * 0.20
+    )
+
+
 def _match_selection_triangle(
     img: np.ndarray,
-    panel_region: tuple[int, int, int, int],
+    search_region: tuple[int, int, int, int],
     triangle_template: np.ndarray,
     *,
     min_confidence: float = 0.80,
     triangle_size_2k: tuple[int, int] = DEFAULT_SELECTION_TRIANGLE_SIZE_2K,
     base_width: int = 2560,
     base_height: int = 1440,
+    content_rect: tuple[int, int, int, int] | None = None,
 ) -> dict | None:
     """Locate the fixed orange selection triangle inside the inventory panel."""
     from src.scanner.window_capture import scale_region
 
-    x1, y1, x2, y2 = panel_region
+    x1, y1, x2, y2 = search_region
     image_h, image_w = img.shape[:2]
     x1 = max(0, x1)
     y1 = max(0, y1)
@@ -201,6 +300,7 @@ def _match_selection_triangle(
         image_w,
         image_h,
         (base_width, base_height),
+        content_rect=content_rect,
     )
     target_w = max(4, scaled_size[2] - scaled_size[0])
     target_h = max(3, scaled_size[3] - scaled_size[1])
@@ -250,6 +350,7 @@ def _match_selection_triangle(
 def _cell_index_from_triangle(
     triangle_match: dict,
     grid_layout: dict,
+    selection_box: tuple[int, int, int, int] | None = None,
 ) -> tuple[int, int]:
     origin_x = float(grid_layout["origin_x"])
     origin_y = float(grid_layout["origin_y"])
@@ -258,8 +359,16 @@ def _cell_index_from_triangle(
     columns = int(grid_layout["grid_columns"])
     rows = int(grid_layout["grid_rows"])
 
-    col = int(round((triangle_match["center_x"] - origin_x - cell_width / 2) / cell_width))
-    row = int(round((triangle_match["bottom_y"] - origin_y) / cell_height))
+    if selection_box is not None:
+        x1, y1, x2, y2 = selection_box
+        center_x = (x1 + x2) / 2
+        top_y = y1
+    else:
+        center_x = float(triangle_match["center_x"])
+        top_y = float(triangle_match["bottom_y"])
+
+    col = int(round((center_x - origin_x - cell_width / 2) / cell_width))
+    row = int(round((top_y - origin_y) / cell_height))
     col = max(0, min(columns - 1, col))
     row = max(0, min(rows - 1, row))
     return row, col
@@ -275,22 +384,31 @@ def find_selected_inventory_cell(
     triangle_size_2k: tuple[int, int] = DEFAULT_SELECTION_TRIANGLE_SIZE_2K,
     base_width: int = 2560,
     base_height: int = 1440,
+    content_rect: tuple[int, int, int, int] | None = None,
 ) -> dict | None:
     """Find the selected inventory slot via the orange triangle indicator above it."""
+    image_h, image_w = img.shape[:2]
+    search_region = _grid_triangle_search_region(
+        grid_layout,
+        panel_region,
+        image_w,
+        image_h,
+    )
     triangle_match = _match_selection_triangle(
         img,
-        panel_region,
+        search_region,
         triangle_template,
         min_confidence=min_triangle_confidence,
         triangle_size_2k=triangle_size_2k,
         base_width=base_width,
         base_height=base_height,
+        content_rect=content_rect,
     )
-    if triangle_match is None:
+    if triangle_match is None or not _triangle_match_is_plausible(triangle_match, grid_layout):
         return None
 
-    row, col = _cell_index_from_triangle(triangle_match, grid_layout)
-    selection_box = _inventory_cell_box(grid_layout, row, col)
+    selection_box = _selection_box_from_triangle(triangle_match, grid_layout, image_w, image_h)
+    row, col = _cell_index_from_triangle(triangle_match, grid_layout, selection_box)
     columns = int(grid_layout["grid_columns"])
     slot_index = row * columns + col + 1
     return {
@@ -342,6 +460,7 @@ def locate_selected_inventory_shape(
     min_margin: float = INVENTORY_SLOT_MIN_MARGIN,
     min_triangle_confidence: float = 0.80,
     triangle_size_2k: tuple[int, int] = DEFAULT_SELECTION_TRIANGLE_SIZE_2K,
+    content_rect: tuple[int, int, int, int] | None = None,
 ) -> dict:
     """Detect the highlighted inventory slot and recognize the drive shape inside it."""
     if panel_region is None:
@@ -355,6 +474,7 @@ def locate_selected_inventory_shape(
             grid_cfg,
             base_width=base_width,
             base_height=base_height,
+            content_rect=content_rect,
         )
 
     if triangle_template is None and triangle_template_path is not None:
@@ -371,6 +491,7 @@ def locate_selected_inventory_shape(
         triangle_size_2k=triangle_size_2k,
         base_width=base_width,
         base_height=base_height,
+        content_rect=content_rect,
     )
     if selected is None:
         return {"shape_id": "Unknown", "confidence": -1.0}

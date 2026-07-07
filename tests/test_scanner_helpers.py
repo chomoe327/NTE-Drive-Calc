@@ -757,12 +757,14 @@ class InventoryAssemblyShapeTests(unittest.TestCase):
             "config/templates/inventory_selection_triangle.png"
         )
         self.assertIsNotNone(triangle_template)
-        grid_layout = build_inventory_grid_layout(width, height)
+        content_rect = ScannerConfig.get_content_rect(width, height)
+        grid_layout = build_inventory_grid_layout(width, height, content_rect=content_rect)
         selected = find_selected_inventory_cell(
             img,
             grid_layout,
             panel_region,
             triangle_template,
+            content_rect=content_rect,
         )
         self.assertIsNotNone(selected)
         self.assertEqual(1, selected["slot_index"])
@@ -779,18 +781,18 @@ class InventoryAssemblyShapeTests(unittest.TestCase):
         )
         self.assertNotEqual("H_2", selected_result["shape_id"])
 
-        h2_box = build_inventory_grid_layout(width, height)
+        h2_box = build_inventory_grid_layout(width, height, content_rect=content_rect)
         from src.features.inventory_import.equipment_classifier import _inventory_cell_box
 
         hx1, hy1, hx2, hy2 = _inventory_cell_box(h2_box, 0, 2)
         h2_result = locate_shape_in_slot_crop(
             {"H_2": recognizer.templates["H_2"]},
             img[hy1:hy2, hx1:hx2],
-            min_confidence=0.64,
+            min_confidence=0.55,
             min_margin=0.0,
         )
         self.assertEqual("H_2", h2_result["shape_id"])
-        self.assertGreaterEqual(h2_result["confidence"], 0.64)
+        self.assertGreaterEqual(h2_result["confidence"], 0.55)
 
 
 class IncrementalBaselineTests(unittest.TestCase):

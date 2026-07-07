@@ -44,17 +44,21 @@ class ScannerConfig:
         return scaled_regions
 
     @classmethod
-    def get_region_profiles(cls, target_width: int, target_height: int) -> list[tuple[str, dict]]:
-        """Return the single top-aligned 16:9 coordinate profile."""
+    def get_content_rect(cls, target_width: int, target_height: int) -> tuple[int, int, int, int]:
+        """Return the fitted 16:9 game content area inside a window."""
         base_aspect = cls.BASE_WIDTH / cls.BASE_HEIGHT
         target_aspect = target_width / max(1, target_height)
         if target_aspect < base_aspect:
             content_width = target_width
             content_height = min(target_height, round(target_width / base_aspect))
-            content_rect = (0, 0, content_width, content_height)
-        else:
-            content_height = target_height
-            content_width = min(target_width, round(target_height * base_aspect))
-            left = round((target_width - content_width) / 2)
-            content_rect = (left, 0, content_width, content_height)
+            return (0, 0, content_width, content_height)
+        content_height = target_height
+        content_width = min(target_width, round(target_height * base_aspect))
+        left = round((target_width - content_width) / 2)
+        return (left, 0, content_width, content_height)
+
+    @classmethod
+    def get_region_profiles(cls, target_width: int, target_height: int) -> list[tuple[str, dict]]:
+        """Return the single top-aligned 16:9 coordinate profile."""
+        content_rect = cls.get_content_rect(target_width, target_height)
         return [("top_16_9", cls.get_scaled_regions(target_width, target_height, content_rect=content_rect))]

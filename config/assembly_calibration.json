@@ -9,7 +9,7 @@
     "stick_update_interval_seconds": 0.05,
     "gamepad_wake": {
         "enabled": true,
-        "stick_x": 1.0,
+        "stick_x": -1.0,
         "stick_y": 0.0,
         "tap_seconds": 0.12,
         "settle_seconds": 0.50
@@ -24,6 +24,7 @@
         "max_steps": 20,
         "grid_columns": 4,
         "min_confidence": 0.65,
+        "target_shape_min_confidence": 0.55,
         "min_margin": 0.05,
         "post_move_delay_seconds": 0.40,
         "selection_triangle_template": "inventory_selection_triangle.png",

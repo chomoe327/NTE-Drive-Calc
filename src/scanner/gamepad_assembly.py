@@ -152,6 +152,10 @@ class GamepadAssemblyController:
             self._selection_triangle_template = load_inventory_selection_triangle(template_path)
         return self._selection_triangle_template
 
+    def _inventory_content_rect(self, image: np.ndarray) -> tuple[int, int, int, int]:
+        image_h, image_w = image.shape[:2]
+        return ScannerConfig.get_content_rect(image_w, image_h)
+
     def _inventory_grid_layout(self, image: np.ndarray) -> dict:
         image_h, image_w = image.shape[:2]
         base_width = int(self.calibration.get("base_width", 2560) or 2560)
@@ -162,6 +166,7 @@ class GamepadAssemblyController:
             self._inventory_grid_cfg(),
             base_width=base_width,
             base_height=base_height,
+            content_rect=self._inventory_content_rect(image),
         )
 
     def _wait_after_inventory_move(self) -> None:
@@ -226,7 +231,6 @@ class GamepadAssemblyController:
     def _recognize_selected_drive_shape(self, shape_id: str | None = None) -> dict:
         image = self._capture_foreground_bgr()
         search_cfg = self._inventory_search_cfg()
-        min_confidence = float(search_cfg.get("min_confidence", 0.65) or 0.65)
         min_margin = float(search_cfg.get("min_margin", 0.05) or 0.05)
         min_triangle_confidence = float(
             search_cfg.get("selection_min_triangle_confidence", 0.80) or 0.80
@@ -237,6 +241,7 @@ class GamepadAssemblyController:
         base_height = int(self.calibration.get("base_height", 1440) or 1440)
         panel_region = self._inventory_panel_region()
         grid_layout = self._inventory_grid_layout(image)
+        content_rect = self._inventory_content_rect(image)
         triangle_template = self._get_selection_triangle_template()
         recognizer = self._get_shape_recognizer()
         candidate_ids = [shape_id] if shape_id else None
@@ -247,6 +252,11 @@ class GamepadAssemblyController:
                 for sid in candidate_ids
                 if sid in templates
             }
+            min_confidence = float(
+                search_cfg.get("target_shape_min_confidence", 0.55) or 0.55
+            )
+        else:
+            min_confidence = float(search_cfg.get("min_confidence", 0.65) or 0.65)
         result = locate_selected_inventory_shape(
             templates,
             image,
@@ -259,6 +269,7 @@ class GamepadAssemblyController:
             triangle_size_2k=triangle_size_2k,
             base_width=base_width,
             base_height=base_height,
+            content_rect=content_rect,
         )
         if result.get("selection_box"):
             x1, y1, x2, y2 = result["selection_box"]
@@ -274,7 +285,9 @@ class GamepadAssemblyController:
 
     def _selection_matches_target(self, shape_id: str, recognition: dict) -> bool:
         search_cfg = self._inventory_search_cfg()
-        min_confidence = float(search_cfg.get("min_confidence", 0.65) or 0.65)
+        min_confidence = float(
+            search_cfg.get("target_shape_min_confidence", 0.55) or 0.55
+        )
         detected = str(recognition.get("shape_id") or "Unknown")
         confidence = float(recognition.get("confidence") or -1.0)
         return detected == shape_id and confidence >= min_confidence
@@ -285,12 +298,12 @@ class GamepadAssemblyController:
         if not wake.get("enabled", True):
             return
 
-        stick_x = float(wake.get("stick_x", 1.0) or 1.0)
+        stick_x = float(wake.get("stick_x", -1.0) or -1.0)
         stick_y = float(wake.get("stick_y", 0.0) or 0.0)
         tap_seconds = float(wake.get("tap_seconds", 0.12) or 0.12)
         settle_seconds = float(wake.get("settle_seconds", 0.50) or 0.50)
         logger.info(
-            f"发送虚拟手柄唤醒信号（此输入可能被游戏消耗，不会移动库存焦点）: "
+            f"发送虚拟手柄唤醒信号（左摇杆轻推，避免右移库存焦点）: "
             f"stick=({stick_x:.3f}, {stick_y:.3f})"
         )
         self.gamepad.left_joystick_float(x_value_float=stick_x, y_value_float=stick_y)
