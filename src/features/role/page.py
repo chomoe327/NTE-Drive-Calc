@@ -58,11 +58,8 @@ __all__ = ["_page_my_role", "_refresh_my_role", "confirm_pending_my_role_changes
 
 def install_methods(app_module, window_cls):
     """Install feature methods onto the main window class."""
-    from . import assembly_controller
-
     window_cls._page_my_role = _page_my_role
     window_cls._refresh_my_role = _refresh_my_role
-    assembly_controller.install_methods(app_module, window_cls)
 
 
 def _page_my_role(window) -> QWidget:
@@ -511,16 +508,12 @@ def _render_my_roles(window):
                 refresh_drive_callback=_refresh_drive_block,
             )
 
-        def _on_auto_assembly(selected_role_name=role_name):
-            window._start_assembly_test(selected_role_name)
-
         drive_group = build_drive_group(
             parent_layout=form,
             window=window,
             role_name=role_name,
             role_data=role_data,
             on_details_callback=_on_show_drive_details,
-            on_auto_assembly_callback=_on_auto_assembly,
         )
 
         if not hasattr(window, "_drive_groups"):

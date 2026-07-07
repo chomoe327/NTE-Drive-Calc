@@ -1,7 +1,7 @@
 {
     "base_width": 2560,
     "base_height": 1440,
-    "title_candidates": ["异环"],
+    "game_window_title": "异环",
     "pre_activate_delay_seconds": 0.5,
     "hold_a_seconds": 0.35,
     "settle_seconds": 0.20,

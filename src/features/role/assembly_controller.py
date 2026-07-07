@@ -1,4 +1,4 @@
-# 角色页自动装配测试入口。
+# 配装页自动装配测试入口。
 """UI controller for the assembly automation prototype test."""
 
 from __future__ import annotations
@@ -11,7 +11,13 @@ from src.app import runtime
 from src.app.workers import WorkerThread
 from src.scanner.assembly_planner import plan_test_placement
 from src.scanner.gamepad_assembly import load_assembly_calibration, run_assembly_drag_test
-from src.scanner.window_control import WindowControlError, activate_window, find_window
+from src.scanner.window_control import (
+    WindowControlError,
+    activate_game_window,
+    activate_window,
+    grant_foreground_permission,
+    is_window_foreground,
+)
 from src.utils.logger import logger
 
 __all__ = [
@@ -35,7 +41,17 @@ def _resolve_config_dir() -> str:
     return "config"
 
 
-def _start_assembly_test(self, role_name: str):
+def _game_window_title(calibration: dict) -> str:
+    title = calibration.get("game_window_title")
+    if title:
+        return str(title).strip()
+    candidates = calibration.get("title_candidates") or ["异环"]
+    if isinstance(candidates, list) and candidates:
+        return str(candidates[0]).strip()
+    return "异环"
+
+
+def _start_assembly_test(self, _role_name: str | None = None):
     if not sys.platform.startswith("win"):
         QMessageBox.warning(self, "不支持", "自动装配测试仅支持 Windows 平台。")
         return
@@ -52,8 +68,7 @@ def _start_assembly_test(self, role_name: str):
             "  1. 游戏已在真红驱动装配页\n"
             "  2. 中间 5×5 网格为空\n"
             "  3. 左侧库存第一个驱动已被选中\n\n"
-            "点击确定后程序将最小化，3 秒后接管虚拟手柄。\n"
-            "窗口标题列表会写入日志，便于确认「异环」准确名称。"
+            "点击确定后程序将最小化，并切换到「异环」窗口，3 秒后接管虚拟手柄。"
         ),
         QMessageBox.Yes | QMessageBox.No,
         QMessageBox.No,
@@ -65,10 +80,19 @@ def _start_assembly_test(self, role_name: str):
         QMessageBox.information(self, "提示", "自动装配测试正在运行，请稍候。")
         return
 
+    calibration = load_assembly_calibration()
+    game_title = _game_window_title(calibration)
+    try:
+        window_info = activate_game_window(game_title)
+    except WindowControlError as exc:
+        QMessageBox.critical(self, "无法激活游戏窗口", str(exc))
+        return
+
+    target_hwnd = window_info.hwnd
+    target_title = window_info.title
     self.showMinimized()
 
     def _run_test():
-        calibration = load_assembly_calibration()
         plan = plan_test_placement(
             role_name="真红",
             piece_id="H_2",
@@ -82,21 +106,17 @@ def _start_assembly_test(self, role_name: str):
             plan.start_c,
         )
 
-        title_candidates = calibration.get("title_candidates") or ["异环"]
-        window_info = find_window(title_candidates)
-        if window_info is None:
-            raise WindowControlError(
-                f"未找到标题包含 {title_candidates!r} 的游戏窗口，请查看日志中的窗口标题列表。"
-            )
-        if not activate_window(window_info.hwnd):
-            raise WindowControlError(f"无法将游戏窗口切换到前台: {window_info.title!r}")
+        if not is_window_foreground(target_hwnd):
+            grant_foreground_permission()
+            if not activate_window(target_hwnd):
+                raise WindowControlError(f"无法将游戏窗口切换到前台: {target_title!r}")
 
         return run_assembly_drag_test(
             role_name=plan.role_name,
             piece_id=plan.piece_id,
             start_r=plan.start_r,
             start_c=plan.start_c,
-            window_title=window_info.title,
+            window_title=target_title,
             delay_seconds=3.0,
             calibration=calibration,
         )
@@ -129,7 +149,7 @@ def _on_assembly_test_error(self, message: str):
     self.activateWindow()
     if isinstance(message, str) and "ViGEmBus" in message:
         title = "虚拟手柄驱动未就绪"
-    elif isinstance(message, str) and "未找到标题" in message:
+    elif isinstance(message, str) and "未找到游戏窗口" in message:
         title = "未找到游戏窗口"
     else:
         title = "自动装配测试失败"

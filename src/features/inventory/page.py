@@ -31,7 +31,10 @@ EQUIPMENT_RENDER_BATCH_SIZE = 3
 
 def install_methods(app_module, window_cls):
     """Install this feature's extracted MainWindow methods."""
+    from src.features.role import assembly_controller
+
     _install_main_window_methods(app_module, window_cls, __all__, globals())
+    assembly_controller.install_methods(app_module, window_cls)
 
 
 def _equipment_compare_signature(self,item):
@@ -48,7 +51,9 @@ def _page_equipment(self):
     clear_btn=QPushButton("清空配装"); clear_btn.setObjectName("btnDanger"); clear_btn.clicked.connect(self._clear_all_equipment)
     sh.addWidget(clear_btn)
     import_all_btn=QPushButton("一键导入"); import_all_btn.setObjectName("btnPrimary"); import_all_btn.clicked.connect(self._import_all_to_my_roles)
-    sh.addWidget(import_all_btn); l.addLayout(sh)
+    sh.addWidget(import_all_btn)
+    auto_assembly_btn=QPushButton("自动装配"); auto_assembly_btn.setObjectName("btnPrimary"); auto_assembly_btn.clicked.connect(self._start_assembly_test)
+    sh.addWidget(auto_assembly_btn); l.addLayout(sh)
     scroll=QScrollArea(); scroll.setWidgetResizable(True)
     self.equip_content=QWidget(); self.equip_content_layout=QVBoxLayout(self.equip_content); scroll.setWidget(self.equip_content)
     l.addWidget(scroll,1); return page
