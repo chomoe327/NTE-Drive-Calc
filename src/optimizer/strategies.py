@@ -15,6 +15,7 @@ from src.models.equipment import Drive, Tape
 from src.optimizer.contracts import AllocationResult, CandidatePool, CustomSetMap, StatPriorityConfigMap
 from src.domain.crit_threshold import (
     crit_rank_adjustment,
+    DEFAULT_CRIT_RATE_CAP,
     drive_has_crit,
     loadout_crit_total,
     normalize_preference_config,
@@ -125,8 +126,7 @@ class BaseDispatchStrategy:
             score += crit_rank_adjustment(
                 current_crit,
                 drive_has_crit(item),
-                pref.get("crit_min_threshold", 20.0),
-                pref.get("crit_max_threshold", 95.0),
+                pref.get("crit_threshold", pref.get("crit_min_threshold", 20.0)),
             )
         return score
 
@@ -134,12 +134,12 @@ class BaseDispatchStrategy:
         return self._rank_score_for_item(role, drive, base_score, config, current_crit=current_crit)
 
     def _crit_rate_cap(self, role: str, crit_rate_caps: Dict[str, float] | None):
-        if not crit_rate_caps or role not in crit_rate_caps:
-            return None
-        try:
-            return float(crit_rate_caps[role])
-        except (TypeError, ValueError):
-            return None
+        if crit_rate_caps and role in crit_rate_caps:
+            try:
+                return float(crit_rate_caps[role])
+            except (TypeError, ValueError):
+                pass
+        return DEFAULT_CRIT_RATE_CAP
 
     def _is_crit_rate_key(self, key: str) -> bool:
         normalized = str(key or "").replace("%", "")
@@ -208,8 +208,6 @@ class BaseDispatchStrategy:
 
     def _within_crit_rate_cap(self, role: str, items, crit_rate_caps: Dict[str, float] | None) -> bool:
         cap = self._crit_rate_cap(role, crit_rate_caps)
-        if cap is None:
-            return True
         total = self._items_crit_rate(items) + self._extra_shape_crit_rate(role, items)
         return total <= cap + 1e-9
 

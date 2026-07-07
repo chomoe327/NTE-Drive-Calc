@@ -8,8 +8,10 @@ from typing import Any
 
 CRIT_STAT = "暴击率%"
 CRIT_RANK_BONUS = 100_000.0
-DEFAULT_CRIT_MIN = 20.0
-DEFAULT_CRIT_MAX = 95.0
+DEFAULT_CRIT_THRESHOLD = 20.0
+DEFAULT_CRIT_RATE_CAP = 95.0
+# 兼容旧配置键名
+DEFAULT_CRIT_MIN = DEFAULT_CRIT_THRESHOLD
 
 
 def _item_value(item: Any, key: str, default=None):
@@ -96,25 +98,18 @@ def normalize_preference_config(config: dict | None) -> dict:
     min_grade = str(config.get("min_grade_limit") or "A").upper()
     if min_grade not in {"D", "C", "B", "A", "S", "SS", "SSS", "ACE"}:
         min_grade = "A"
+    raw_threshold = config.get("crit_threshold", config.get("crit_min_threshold", DEFAULT_CRIT_THRESHOLD))
     try:
-        crit_min = float(config.get("crit_min_threshold", DEFAULT_CRIT_MIN))
+        crit_threshold = float(raw_threshold)
     except (TypeError, ValueError):
-        crit_min = DEFAULT_CRIT_MIN
-    try:
-        crit_max = float(config.get("crit_max_threshold", DEFAULT_CRIT_MAX))
-    except (TypeError, ValueError):
-        crit_max = DEFAULT_CRIT_MAX
-    crit_min = max(0.0, min(100.0, crit_min))
-    crit_max = max(0.0, min(100.0, crit_max))
-    if crit_min > crit_max:
-        crit_min, crit_max = crit_max, crit_min
+        crit_threshold = DEFAULT_CRIT_THRESHOLD
+    crit_threshold = max(0.0, min(100.0, crit_threshold))
     return {
         "stats": stats,
         "equal_priority": bool(config.get("equal_priority", False)),
         "ignore_grade_limit": bool(config.get("ignore_grade_limit", False)),
         "min_grade_limit": min_grade,
-        "crit_min_threshold": crit_min,
-        "crit_max_threshold": crit_max,
+        "crit_threshold": crit_threshold,
     }
 
 
@@ -125,14 +120,11 @@ def preference_config_active(config: dict | None) -> bool:
 def crit_rank_adjustment(
     current_crit: float,
     drive_has_crit_stat: bool,
-    min_threshold: float = DEFAULT_CRIT_MIN,
-    max_threshold: float = DEFAULT_CRIT_MAX,
+    threshold: float = DEFAULT_CRIT_THRESHOLD,
 ) -> float:
     if not drive_has_crit_stat:
         return 0.0
-    if current_crit >= max_threshold:
-        return -CRIT_RANK_BONUS
-    if current_crit < min_threshold:
+    if current_crit < threshold:
         return CRIT_RANK_BONUS
     return 0.0
 

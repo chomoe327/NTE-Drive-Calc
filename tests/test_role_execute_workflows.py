@@ -221,10 +221,10 @@ class RolePriorityWorkflowTests(unittest.TestCase):
             )
             selector.selected = ["A", "B"]
             selector._set_custom_weapon("A", "弧盘A")
-            self.assertEqual({"A": 76.0}, selector.get_crit_rate_caps())
+            self.assertEqual({"A": 71.0}, selector.get_crit_rate_caps())
             selector.weapons_db["弧盘B"] = {"level_sub_stats": {"80": {"暴击率%": 12.5}}}
             selector._set_custom_weapon("A", "弧盘B")
-            self.assertEqual({"A": 87.5}, selector.get_crit_rate_caps())
+            self.assertEqual({"A": 82.5}, selector.get_crit_rate_caps())
             selector._set_crit_rate_cap("A", 88.8)
             selector.save_priority_config(show_message=False)
 

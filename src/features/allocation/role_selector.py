@@ -37,7 +37,7 @@ from src.features.allocation.priority_groups import (
 )
 from src.solver.set_effects import FOUR_PIECE, NO_EFFECT, SET_EFFECT_MODES, TWO_PIECE, normalize_set_effect_mode
 from src.domain.grade_limits import STAT_PRIORITY_GRADE_OPTIONS
-from src.domain.crit_threshold import DEFAULT_CRIT_MAX, DEFAULT_CRIT_MIN
+from src.domain.crit_threshold import DEFAULT_CRIT_RATE_CAP, DEFAULT_CRIT_THRESHOLD
 
 
 def resolve_priority_choice(values: list[str], raw_text: str | None, current_data=None) -> str:
@@ -401,16 +401,20 @@ class RoleSelector(QWidget):
 
     def _set_crit_rate_cap(self, name, value):
         try:
-            cap = float(value)
+            cap = float(value) if str(value or "").strip() else DEFAULT_CRIT_RATE_CAP
         except (TypeError, ValueError):
-            self.crit_rate_caps.pop(name, None)
-            self.orderChanged.emit()
-            return
+            cap = DEFAULT_CRIT_RATE_CAP
         if cap < 0:
-            self.crit_rate_caps.pop(name, None)
-        else:
-            self.crit_rate_caps[name] = round(min(cap, 100.0), 4)
+            cap = DEFAULT_CRIT_RATE_CAP
+        self.crit_rate_caps[name] = round(min(cap, 100.0), 4)
         self.orderChanged.emit()
+
+    def _default_crit_rate_cap(self, weapon_name=None) -> float:
+        if weapon_name:
+            weapon_cap = self._weapon_crit_rate_cap(weapon_name)
+            if weapon_cap is not None:
+                return weapon_cap
+        return DEFAULT_CRIT_RATE_CAP
 
     def _weapon_crit_rate_cap(self, weapon_name):
         info = self.weapons_db.get(weapon_name)
@@ -426,7 +430,7 @@ class RoleSelector(QWidget):
             normalized = str(key or "").replace("%", "")
             if "暴击率" in normalized or "鏆村嚮鐜" in normalized:
                 try:
-                    return round(max(0.0, 100.0 - float(value)), 4)
+                    return round(max(0.0, DEFAULT_CRIT_RATE_CAP - float(value)), 4)
                 except (TypeError, ValueError):
                     return None
         return None
@@ -445,30 +449,22 @@ class RoleSelector(QWidget):
         equal_priority=False,
         ignore_grade_limit=False,
         min_grade_limit="A",
-        crit_min_threshold=DEFAULT_CRIT_MIN,
-        crit_max_threshold=DEFAULT_CRIT_MAX,
+        crit_threshold=DEFAULT_CRIT_THRESHOLD,
     ):
         clean = []
         for stat in stats or []:
             if stat and stat in self.drive_sub_stats and stat not in clean:
                 clean.append(stat)
         try:
-            crit_min = int(crit_min_threshold)
+            crit_value = int(crit_threshold)
         except (TypeError, ValueError):
-            crit_min = DEFAULT_CRIT_MIN
-        try:
-            crit_max = int(crit_max_threshold)
-        except (TypeError, ValueError):
-            crit_max = DEFAULT_CRIT_MAX
-        crit_min = max(0, min(100, crit_min))
-        crit_max = max(0, min(100, crit_max))
-        if crit_min > crit_max:
-            crit_min, crit_max = crit_max, crit_min
+            crit_value = DEFAULT_CRIT_THRESHOLD
+        crit_value = max(0, min(100, crit_value))
         min_grade = str(min_grade_limit or "A").upper()
         if min_grade not in STAT_PRIORITY_GRADE_OPTIONS:
             min_grade = "A"
         has_custom_grade = not ignore_grade_limit and min_grade != "A"
-        has_custom_crit = crit_min != DEFAULT_CRIT_MIN or crit_max != DEFAULT_CRIT_MAX
+        has_custom_crit = crit_value != DEFAULT_CRIT_THRESHOLD
         has_options = bool(equal_priority or ignore_grade_limit)
         if clean or has_custom_grade or has_custom_crit or has_options:
             self.stat_priority_configs[name] = {
@@ -476,8 +472,7 @@ class RoleSelector(QWidget):
                 "equal_priority": bool(equal_priority),
                 "ignore_grade_limit": bool(ignore_grade_limit),
                 "min_grade_limit": min_grade,
-                "crit_min_threshold": crit_min,
-                "crit_max_threshold": crit_max,
+                "crit_threshold": crit_value,
             }
         else:
             self.stat_priority_configs.pop(name, None)
@@ -654,20 +649,18 @@ class RoleSelector(QWidget):
 
         crit_row = QHBoxLayout()
         crit_row.setSpacing(8)
-        crit_min_label = QLabel("暴击率最小阈值")
-        crit_min_spin = QSpinBox()
-        crit_min_spin.setRange(0, 100)
-        crit_min_spin.setSuffix("%")
-        crit_min_spin.setValue(int(current_stat_cfg.get("crit_min_threshold", DEFAULT_CRIT_MIN)))
-        crit_max_label = QLabel("暴击率最大阈值")
-        crit_max_spin = QSpinBox()
-        crit_max_spin.setRange(0, 100)
-        crit_max_spin.setSuffix("%")
-        crit_max_spin.setValue(int(current_stat_cfg.get("crit_max_threshold", DEFAULT_CRIT_MAX)))
-        crit_row.addWidget(crit_min_label)
-        crit_row.addWidget(crit_min_spin)
-        crit_row.addWidget(crit_max_label)
-        crit_row.addWidget(crit_max_spin)
+        crit_threshold_label = QLabel("暴击率阈值")
+        crit_threshold_spin = QSpinBox()
+        crit_threshold_spin.setRange(0, 100)
+        crit_threshold_spin.setSuffix("%")
+        raw_threshold = current_stat_cfg.get(
+            "crit_threshold",
+            current_stat_cfg.get("crit_min_threshold", DEFAULT_CRIT_THRESHOLD),
+        )
+        crit_threshold_spin.setValue(int(raw_threshold))
+        crit_row.addWidget(crit_threshold_label)
+        crit_row.addWidget(crit_threshold_spin)
+        crit_row.addStretch(1)
         stat_layout.addLayout(crit_row)
 
         def sync_grade_combo_enabled(checked=False):
@@ -731,13 +724,19 @@ class RoleSelector(QWidget):
         current_cap = self.crit_rate_caps.get(name)
         if current_cap is not None:
             crit_cap_edit.setText(f"{float(current_cap):g}")
-        crit_cap_edit.setPlaceholderText("留空不限制")
+        else:
+            selected_weapon = self.custom_weapons.get(name, "")
+            default_cap = self._default_crit_rate_cap(selected_weapon or None)
+            crit_cap_edit.setText(f"{float(default_cap):g}")
+        crit_cap_edit.setPlaceholderText("默认95%")
 
         def apply_weapon_cap(text):
             resolved = resolve_priority_choice(weapon_names, str(text or "").strip(), None)
-            cap = self._weapon_crit_rate_cap(resolved) if resolved in weapon_names else None
-            if cap is not None:
-                crit_cap_edit.setText(f"{float(cap):g}")
+            if resolved in weapon_names:
+                cap = self._weapon_crit_rate_cap(resolved)
+                crit_cap_edit.setText(f"{float(cap if cap is not None else DEFAULT_CRIT_RATE_CAP):g}")
+            else:
+                crit_cap_edit.setText(f"{float(DEFAULT_CRIT_RATE_CAP):g}")
 
         weapon_combo.currentTextChanged.connect(apply_weapon_cap)
         cap_row.addWidget(crit_cap_edit, 1)
@@ -765,12 +764,10 @@ class RoleSelector(QWidget):
                 stat_equal.isChecked(),
                 ignore_grade_limit.isChecked(),
                 grade_combo.currentData(),
-                crit_min_spin.value(),
-                crit_max_spin.value(),
+                crit_threshold_spin.value(),
             )
-            cap_text = crit_cap_edit.text().strip()
-            if cap_text or not selected_weapon:
-                self._set_crit_rate_cap(name, cap_text)
+            cap_text = crit_cap_edit.text().strip() or str(DEFAULT_CRIT_RATE_CAP)
+            self._set_crit_rate_cap(name, cap_text)
             self._set_set_effect_mode(name, effect_combo.currentData())
             self._render_grid(self.search.text())
 
@@ -959,25 +956,21 @@ class RoleSelector(QWidget):
                 if min_grade not in STAT_PRIORITY_GRADE_OPTIONS:
                     min_grade = "A"
                 try:
-                    crit_min = int(cfg_item.get("crit_min_threshold", DEFAULT_CRIT_MIN))
+                    raw_threshold = cfg_item.get("crit_threshold", cfg_item.get("crit_min_threshold", DEFAULT_CRIT_THRESHOLD))
+                    crit_value = int(raw_threshold)
                 except (TypeError, ValueError):
-                    crit_min = DEFAULT_CRIT_MIN
-                try:
-                    crit_max = int(cfg_item.get("crit_max_threshold", DEFAULT_CRIT_MAX))
-                except (TypeError, ValueError):
-                    crit_max = DEFAULT_CRIT_MAX
+                    crit_value = DEFAULT_CRIT_THRESHOLD
                 ignore_grade = bool(cfg_item.get("ignore_grade_limit", False))
                 equal_priority = bool(cfg_item.get("equal_priority", False))
                 has_custom_grade = not ignore_grade and min_grade != "A"
-                has_custom_crit = crit_min != DEFAULT_CRIT_MIN or crit_max != DEFAULT_CRIT_MAX
+                has_custom_crit = crit_value != DEFAULT_CRIT_THRESHOLD
                 if stats or has_custom_grade or has_custom_crit or ignore_grade or equal_priority:
                     self.stat_priority_configs[role] = {
                         "stats": stats,
                         "equal_priority": equal_priority,
                         "ignore_grade_limit": ignore_grade,
                         "min_grade_limit": min_grade,
-                        "crit_min_threshold": max(0, min(100, crit_min)),
-                        "crit_max_threshold": max(0, min(100, crit_max)),
+                        "crit_threshold": max(0, min(100, crit_value)),
                     }
             self.set_effect_modes = {}
             for role, mode in data.get("set_effect_modes", {}).items():
@@ -1026,8 +1019,9 @@ STAT_PRIORITY_HELP = (
     "未勾选“不限制评分等级”时，可通过“最低生效等级”选择 D 至 ACE 的门槛；"
     "默认 A 级，避免选到整体太差的装备。\n"
     "勾选“不限制评分等级”后，只要命中自选词条，即使评分较低也可以参与分配。\n\n"
-    "暴击率最小/最大阈值会参考当前配装的累计暴击率：低于最小阈值时优先选择带暴击词条的驱动，"
-    "达到最小阈值后取消该加成；达到最大阈值后不再优先选择带暴击的驱动。"
+    "暴击率阈值会参考当前配装的累计暴击率：低于阈值时优先选择带暴击词条的驱动，"
+    "达到阈值后取消该加成；暴击率上限（默认 95%）会硬性限制配装总暴击，"
+    "选择带暴击率的弧盘时会自动按 95% 减去弧盘暴击率计算上限。"
 )
 
 
