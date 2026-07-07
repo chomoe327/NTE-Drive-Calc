@@ -3,13 +3,14 @@
     "base_height": 1440,
     "game_window_title": "异环",
     "pre_activate_delay_seconds": 0.5,
-    "hold_a_seconds": 0.35,
-    "settle_seconds": 0.20,
+    "hold_a_seconds": 0.55,
+    "post_hold_a_seconds": 0.20,
+    "settle_seconds": 0.25,
     "stick_update_interval_seconds": 0.05,
     "drag_from_inventory_focus": {
-        "stick_x": 0.0,
-        "stick_y": -0.55,
-        "duration_seconds": 1.0
+        "stick_x": 0.72,
+        "stick_y": -0.18,
+        "duration_seconds": 1.35
     },
     "grid_nudge": {
         "stick_x_per_col": 0.08,

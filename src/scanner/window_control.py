@@ -89,21 +89,12 @@ def _find_game_window_by_enum(exact_title: str) -> WindowInfo | None:
 
 
 def find_game_window(title: str = "异环") -> WindowInfo | None:
-    """Find the game window by exact title."""
+    """Find the game window by exact title via EnumWindows."""
     _require_windows()
-    user32 = _user32()
     exact_title = str(title or "异环").strip() or "异环"
-
-    hwnd = int(user32.FindWindowW(None, exact_title) or 0)
-    if hwnd:
-        actual_title = _read_window_title(hwnd) or exact_title
-        logger.info(f"FindWindowW 已找到游戏窗口: hwnd={hwnd}, title={actual_title!r}")
-        return WindowInfo(hwnd=hwnd, title=actual_title)
-
-    logger.debug(f"FindWindowW 未命中，改用 EnumWindows 精确匹配: title={exact_title!r}")
     matched = _find_game_window_by_enum(exact_title)
     if matched is not None:
-        logger.info(f"EnumWindows 已找到游戏窗口: hwnd={matched.hwnd}, title={matched.title!r}")
+        logger.info(f"已找到游戏窗口: hwnd={matched.hwnd}, title={matched.title!r}")
         return matched
 
     logger.warning(f"未找到标题为 {exact_title!r} 的游戏窗口")

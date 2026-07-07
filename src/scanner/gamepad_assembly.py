@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +46,12 @@ def load_assembly_calibration(config_path: Path | None = None) -> dict:
     raise FileNotFoundError("找不到 assembly_calibration.json 配置文件。")
 
 
+def assembly_test_dir() -> Path:
+    output_dir = runtime.ACCOUNT_DATA_ROOT / "test"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
+
+
 class GamepadAssemblyController:
     """Drive-block drag controller built on top of ViGEm virtual gamepad."""
 
@@ -68,28 +73,68 @@ class GamepadAssemblyController:
             raise
         time.sleep(2)
         logger.success("虚拟手柄连接完成（装配测试）")
+        self._drag_active = False
+        self._current_stick = (0.0, 0.0)
 
-    def hold_button_a(self) -> None:
-        hold_seconds = float(self.calibration.get("hold_a_seconds", 0.35) or 0.35)
+    def _send_drag_input(self, stick_x: float, stick_y: float) -> None:
+        """Send stick + A-pressed in one frame. A is never released while dragging."""
+        if not self._drag_active:
+            raise RuntimeError("拖动尚未开始，不能发送拖动输入。")
+        self._current_stick = (float(stick_x), float(stick_y))
+        self.gamepad.left_joystick_float(
+            x_value_float=self._current_stick[0],
+            y_value_float=self._current_stick[1],
+        )
         self.gamepad.press_button(button=self._buttons.XUSB_GAMEPAD_A)
         self.gamepad.update()
-        time.sleep(hold_seconds)
 
-    def move_left_stick(self, stick_x: float, stick_y: float, duration_seconds: float) -> None:
-        duration_seconds = max(0.0, float(duration_seconds))
-        end_time = time.perf_counter() + duration_seconds
-        self.gamepad.left_joystick_float(x_value_float=float(stick_x), y_value_float=float(stick_y))
-        self.gamepad.update()
+    def _hold_for(self, duration_seconds: float, stick_x: float = 0.0, stick_y: float = 0.0) -> None:
+        end_time = time.perf_counter() + max(0.0, float(duration_seconds))
         while time.perf_counter() < end_time:
+            self._send_drag_input(stick_x, stick_y)
             time.sleep(self._stick_interval)
-            self.gamepad.left_joystick_float(x_value_float=float(stick_x), y_value_float=float(stick_y))
-            self.gamepad.update()
+        self._send_drag_input(stick_x, stick_y)
 
-    def release_button_a(self) -> None:
+    def _begin_drag_hold(self) -> None:
+        """Press and continuously hold A until _finish_drag_hold is called."""
+        if self._drag_active:
+            raise RuntimeError("拖动已在进行中。")
+
+        hold_seconds = float(self.calibration.get("hold_a_seconds", 0.55) or 0.55)
+        post_hold_seconds = float(self.calibration.get("post_hold_a_seconds", 0.20) or 0.20)
+        self._drag_active = True
+        self._current_stick = (0.0, 0.0)
+
+        logger.info(
+            f"开始长按 A 抓起驱动块，全程保持按住 "
+            f"(hold={hold_seconds:.2f}s, settle={post_hold_seconds:.2f}s)"
+        )
+        self._hold_for(hold_seconds, 0.0, 0.0)
+        if post_hold_seconds > 0:
+            self._hold_for(post_hold_seconds, 0.0, 0.0)
+
+    def _move_stick_while_holding(self, stick_x: float, stick_y: float, duration_seconds: float) -> None:
+        if not self._drag_active:
+            raise RuntimeError("必须先长按 A 抓起驱动块，才能在保持按住时移动。")
+        logger.debug(
+            f"保持 A 按住并移动摇杆: stick=({stick_x:.3f}, {stick_y:.3f}) "
+            f"duration={duration_seconds:.2f}s"
+        )
+        self._hold_for(duration_seconds, stick_x, stick_y)
+
+    def _finish_drag_hold(self) -> None:
+        """Release A only after reaching the target grid cell."""
+        if not self._drag_active:
+            return
+
+        logger.info("已到达目标位置，松开 A 放置驱动块")
         self.gamepad.left_joystick_float(x_value_float=0.0, y_value_float=0.0)
         self.gamepad.release_button(button=self._buttons.XUSB_GAMEPAD_A)
         self.gamepad.update()
-        settle_seconds = float(self.calibration.get("settle_seconds", 0.20) or 0.20)
+        self._drag_active = False
+        self._current_stick = (0.0, 0.0)
+
+        settle_seconds = float(self.calibration.get("settle_seconds", 0.25) or 0.25)
         time.sleep(settle_seconds)
 
     def _build_drag_moves(self, start_r: int, start_c: int) -> list[StickMove]:
@@ -131,23 +176,35 @@ class GamepadAssemblyController:
         return moves
 
     def drag_to_grid_cell(self, start_r: int, start_c: int) -> list[StickMove]:
+        """Pick up with A held, move to target cell while still holding, then release A."""
         moves = self._build_drag_moves(start_r, start_c)
         logger.info(
             f"开始拖动到网格 ({start_r}, {start_c})，共 {len(moves)} 段摇杆动作。"
         )
-        for index, move in enumerate(moves, 1):
-            logger.info(
-                f"  [拖动 {index}/{len(moves)}] stick=({move.stick_x:.3f}, {move.stick_y:.3f}) "
-                f"duration={move.duration_seconds:.2f}s"
-            )
-            self.move_left_stick(move.stick_x, move.stick_y, move.duration_seconds)
+
+        self._begin_drag_hold()
+        try:
+            for index, move in enumerate(moves, 1):
+                logger.info(
+                    f"  [拖动 {index}/{len(moves)} | A 保持按住] "
+                    f"stick=({move.stick_x:.3f}, {move.stick_y:.3f}) "
+                    f"duration={move.duration_seconds:.2f}s"
+                )
+                self._move_stick_while_holding(
+                    move.stick_x,
+                    move.stick_y,
+                    move.duration_seconds,
+                )
+        finally:
+            if self._drag_active:
+                self._finish_drag_hold()
+
         return moves
 
     @staticmethod
     def capture_screenshot(filename: str) -> str:
-        output_dir = runtime.SCREENSHOT_DIR
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, filename)
+        output_dir = assembly_test_dir()
+        output_path = str(output_dir / filename)
         with mss.MSS() as sct:
             screenshot, _ = capture_foreground_window(sct)
         mss.tools.to_png(screenshot.rgb, screenshot.size, output=output_path)
@@ -169,12 +226,10 @@ def run_assembly_drag_test(
     controller = GamepadAssemblyController(calibration=calibration)
     before_path = controller.capture_screenshot("assembly_test_before.png")
 
-    logger.warning("装配测试将在 %.1f 秒后接管控制，请保持游戏界面不动。", delay_seconds)
+    logger.warning(f"装配测试将在 {delay_seconds:.1f} 秒后接管控制，请保持游戏界面不动。")
     time.sleep(max(0.0, float(delay_seconds)))
 
-    controller.hold_button_a()
     applied_moves = controller.drag_to_grid_cell(start_r, start_c)
-    controller.release_button_a()
 
     after_path = controller.capture_screenshot("assembly_test_after.png")
     return AssemblyTestResult(

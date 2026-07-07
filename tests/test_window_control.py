@@ -7,24 +7,8 @@ from src.scanner import window_control
 
 
 class WindowControlTests(unittest.TestCase):
-    def test_find_game_window_uses_find_windoww_first(self):
+    def test_find_game_window_uses_enum_exact_match(self):
         fake_user32 = MagicMock()
-        fake_user32.FindWindowW.return_value = 1117414
-        fake_user32.GetWindowTextLengthW.return_value = 2
-        fake_user32.GetWindowTextW.side_effect = lambda _hwnd, buffer, _size: buffer.__setitem__(0, "异环") or 2
-
-        with patch.object(ctypes, "windll") as windll:
-            windll.user32 = fake_user32
-            matched = window_control.find_game_window("异环")
-
-        fake_user32.FindWindowW.assert_called_once_with(None, "异环")
-        self.assertIsNotNone(matched)
-        self.assertEqual(1117414, matched.hwnd)
-        self.assertEqual("异环", matched.title)
-
-    def test_find_game_window_falls_back_to_enum(self):
-        fake_user32 = MagicMock()
-        fake_user32.FindWindowW.return_value = 0
         fake_user32.IsWindowVisible.return_value = True
         fake_user32.GetWindowTextLengthW.return_value = 2
         fake_user32.GetWindowTextW.side_effect = lambda hwnd, buffer, _size: (
@@ -43,12 +27,13 @@ class WindowControlTests(unittest.TestCase):
             windll.user32 = fake_user32
             matched = window_control.find_game_window("异环")
 
+        fake_user32.EnumWindows.assert_called_once()
         self.assertIsNotNone(matched)
         self.assertEqual(1117414, matched.hwnd)
+        self.assertEqual("异环", matched.title)
 
     def test_find_game_window_returns_none_when_missing(self):
         fake_user32 = MagicMock()
-        fake_user32.FindWindowW.return_value = 0
         fake_user32.EnumWindows.return_value = True
 
         with patch.object(ctypes, "windll") as windll:
