@@ -1,6 +1,11 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+from src.scanner.assembly_vision import (
+    compute_position_error,
+    estimate_position_error_from_origin,
+    needs_position_correction,
+)
 from src.scanner.gamepad_assembly import GamepadAssemblyController, InventoryDriveNotFoundError, StickMove
 
 
@@ -61,6 +66,15 @@ class GamepadAssemblyTests(unittest.TestCase):
         self.assertEqual(2, len(moves))
         self.assertEqual("01_right", moves[0].label)
         self.assertEqual(StickMove(0.95, 0.0, 0.02, "01_right"), moves[0])
+
+    def test_compute_position_error_returns_none_when_detection_missing(self):
+        self.assertIsNone(compute_position_error(None, 2.0, 1, 3))
+        self.assertFalse(
+            needs_position_correction(0.0, 0.0, max_cell_error=0.45)
+        )
+        delta_r, delta_c = estimate_position_error_from_origin(1, 3, origin_r=1, origin_c=0)
+        self.assertEqual((0.0, 3.0), (delta_r, delta_c))
+        self.assertTrue(needs_position_correction(delta_r, delta_c, max_cell_error=0.45))
 
     def test_select_inventory_drive_wakes_before_search(self):
         calibration = dict(self.calibration)

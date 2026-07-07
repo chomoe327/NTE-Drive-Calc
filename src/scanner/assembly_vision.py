@@ -22,6 +22,20 @@ def assembly_board_region(
         rect = get_foreground_client_rect()
         image_width, image_height = rect.width, rect.height
 
+    content_rect = ScannerConfig.get_content_rect(image_width, image_height)
+    override = (calibration or {}).get("assembly_board", {}) or {}
+    region_2k = override.get("region_2k")
+    if isinstance(region_2k, (list, tuple)) and len(region_2k) == 4:
+        from src.scanner.window_capture import scale_region
+
+        return scale_region(
+            tuple(int(v) for v in region_2k),
+            image_width,
+            image_height,
+            (ScannerConfig.BASE_WIDTH, ScannerConfig.BASE_HEIGHT),
+            content_rect=content_rect,
+        )
+
     profiles = ScannerConfig.get_region_profiles(image_width, image_height)
     _, regions = profiles[0]
     return regions["assembly_board"]
@@ -78,6 +92,23 @@ def _detect_orange_piece_anchor(
         if score > best_score:
             best_score = score
             best = (x, y, box_w, box_h)
+
+    if best is None:
+        relaxed_mask = cv2.inRange(hsv, np.array([4, 60, 90]), np.array([32, 255, 255]))
+        relaxed_mask = cv2.morphologyEx(relaxed_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        contours, _ = cv2.findContours(relaxed_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
+            x, y, box_w, box_h = cv2.boundingRect(contour)
+            area = box_w * box_h
+            if area < min_area or area > max_area:
+                continue
+            aspect = box_w / max(box_h, 1)
+            if aspect > 5.0 or aspect < 0.15:
+                continue
+            score = area * (1.25 if 1.0 <= aspect <= 4.0 else 1.0)
+            if score > best_score:
+                best_score = score
+                best = (x, y, box_w, box_h)
 
     if best is None:
         return None
@@ -185,10 +216,21 @@ def compute_position_error(
     detected_c: float | None,
     target_r: int,
     target_c: int,
-) -> tuple[float, float]:
+) -> tuple[float, float] | None:
     if detected_r is None or detected_c is None:
-        return 0.0, 0.0
+        return None
     return float(target_r) - float(detected_r), float(target_c) - float(detected_c)
+
+
+def estimate_position_error_from_origin(
+    target_r: int,
+    target_c: int,
+    *,
+    origin_r: int,
+    origin_c: int,
+) -> tuple[float, float]:
+    """Fallback error estimate when vision cannot detect the dragged piece."""
+    return float(target_r) - float(origin_r), float(target_c) - float(origin_c)
 
 
 def needs_position_correction(

@@ -51,6 +51,7 @@
         "stick_y_per_row": 0.14,
         "max_stick": 0.45,
         "nudge_seconds": 0.10,
+        "post_drag_settle_seconds": 0.35,
         "correct_after_each_move": false
     },
     "drag_moves": [

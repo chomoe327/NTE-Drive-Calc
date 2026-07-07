@@ -24,6 +24,7 @@ from src.scanner.assembly_vision import (
     compute_position_error,
     correction_stick_for_error,
     detect_dragged_piece_anchor,
+    estimate_position_error_from_origin,
     grid_dimensions,
     needs_position_correction,
 )
@@ -495,7 +496,12 @@ class GamepadAssemblyController:
 
     def _detect_piece_position(self, piece_id: str) -> dict:
         image = self._capture_foreground_bgr()
-        board_region = assembly_board_region(self.calibration)
+        image_h, image_w = image.shape[:2]
+        board_region = assembly_board_region(
+            self.calibration,
+            image_width=image_w,
+            image_height=image_h,
+        )
         grid_rows, grid_cols = grid_dimensions(self.calibration)
         correction_cfg = self._position_correction_cfg()
         min_confidence = float(correction_cfg.get("min_match_confidence", 0.50) or 0.50)
@@ -509,6 +515,10 @@ class GamepadAssemblyController:
             min_confidence=min_confidence,
         )
 
+    def _correction_settle_seconds(self) -> float:
+        correction_cfg = self._position_correction_cfg()
+        return float(correction_cfg.get("post_drag_settle_seconds", 0.35) or 0.35)
+
     def _correct_drag_position(self, piece_id: str, target_r: int, target_c: int) -> list[StickMove]:
         correction_cfg = self._position_correction_cfg()
         if not correction_cfg.get("enabled", True):
@@ -516,21 +526,49 @@ class GamepadAssemblyController:
 
         max_iterations = max(1, int(correction_cfg.get("max_iterations", 10) or 10))
         max_cell_error = float(correction_cfg.get("max_cell_error", 0.45) or 0.45)
+        settle_seconds = self._correction_settle_seconds()
+        origin_r = int(self.calibration.get("grid_origin_r", 0) or 0)
+        origin_c = int(self.calibration.get("grid_origin_c", 0) or 0)
         corrections: list[StickMove] = []
+        used_origin_fallback = False
 
         for iteration in range(1, max_iterations + 1):
             detection = self._detect_piece_position(piece_id)
             detected_r = detection.get("anchor_r")
             detected_c = detection.get("anchor_c")
-            delta_r, delta_c = compute_position_error(detected_r, detected_c, target_r, target_c)
-            logger.info(
-                f"  [位置校正 {iteration}/{max_iterations}] "
-                f"检测=({detected_r}, {detected_c}) 目标=({target_r}, {target_c}) "
-                f"误差=(Δr={delta_r:.2f}, Δc={delta_c:.2f}) "
-                f"conf={detection.get('confidence')} method={detection.get('method')}"
-            )
+            error = compute_position_error(detected_r, detected_c, target_r, target_c)
+            if error is None:
+                if used_origin_fallback:
+                    logger.warning(
+                        f"  [位置校正 {iteration}/{max_iterations}] "
+                        "连续检测失败，停止校正。"
+                    )
+                    break
+                used_origin_fallback = True
+                delta_r, delta_c = estimate_position_error_from_origin(
+                    target_r,
+                    target_c,
+                    origin_r=origin_r,
+                    origin_c=origin_c,
+                )
+                logger.warning(
+                    f"  [位置校正 {iteration}/{max_iterations}] "
+                    f"未能检测拖动块 (conf={detection.get('confidence')})，"
+                    f"改从估计起点 ({origin_r}, {origin_c}) 计算误差 "
+                    f"(Δr={delta_r:.2f}, Δc={delta_c:.2f})"
+                )
+            else:
+                delta_r, delta_c = error
+                logger.info(
+                    f"  [位置校正 {iteration}/{max_iterations}] "
+                    f"检测=({detected_r}, {detected_c}) 目标=({target_r}, {target_c}) "
+                    f"误差=(Δr={delta_r:.2f}, Δc={delta_c:.2f}) "
+                    f"conf={detection.get('confidence')} method={detection.get('method')}"
+                )
+
             if not needs_position_correction(delta_r, delta_c, max_cell_error=max_cell_error):
-                logger.success("拖动位置已接近目标格，停止校正。")
+                if error is not None:
+                    logger.success("拖动位置已接近目标格，停止校正。")
                 break
 
             stick_x, stick_y, duration = correction_stick_for_error(delta_r, delta_c, correction_cfg)
@@ -545,6 +583,8 @@ class GamepadAssemblyController:
                 f"  发送校正摇杆: stick=({stick_x:.3f}, {stick_y:.3f}) duration={duration:.2f}s"
             )
             self._move_stick_while_holding(move)
+            if settle_seconds > 0:
+                time.sleep(settle_seconds)
         else:
             logger.warning("位置校正达到最大次数，仍将尝试放置。")
 
@@ -573,6 +613,9 @@ class GamepadAssemblyController:
                 if correction_cfg.get("correct_after_each_move", False):
                     applied_moves.extend(self._correct_drag_position(piece_id, start_r, start_c))
 
+            settle_seconds = self._correction_settle_seconds()
+            if settle_seconds > 0:
+                time.sleep(settle_seconds)
             applied_moves.extend(self._correct_drag_position(piece_id, start_r, start_c))
         finally:
             if self._drag_active:
