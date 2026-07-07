@@ -7,16 +7,39 @@
     "post_hold_a_seconds": 0.20,
     "settle_seconds": 0.25,
     "stick_update_interval_seconds": 0.05,
-    "drag_from_inventory_focus": {
-        "stick_x": 0.72,
-        "stick_y": -0.18,
-        "duration_seconds": 1.35
+    "inventory_focus_index": 2,
+    "inventory_nav": {
+        "tap_seconds": 0.10,
+        "settle_seconds": 0.25,
+        "right_stick_x": 1.0
     },
+    "drag_moves": [
+        {
+            "label": "01_right",
+            "stick_x": 0.95,
+            "stick_y": 0.0,
+            "duration_seconds": 1.10
+        },
+        {
+            "label": "02_down",
+            "stick_x": 0.0,
+            "stick_y": -0.30,
+            "duration_seconds": 0.50
+        }
+    ],
     "grid_nudge": {
         "stick_x_per_col": 0.08,
         "stick_y_per_row": 0.08,
         "duration_per_step": 0.12
     },
     "grid_origin_r": 1,
-    "grid_origin_c": 0
+    "grid_origin_c": 0,
+    "debug_capture": {
+        "enabled": true,
+        "after_inventory_focus": true,
+        "after_pickup": true,
+        "after_each_move": true,
+        "before_release": true,
+        "interval_seconds": 0.45
+    }
 }

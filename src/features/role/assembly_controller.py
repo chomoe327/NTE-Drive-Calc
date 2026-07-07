@@ -67,8 +67,9 @@ def _start_assembly_test(self, _role_name: str | None = None):
             "请先确保：\n"
             "  1. 游戏已在真红驱动装配页\n"
             "  2. 中间 5×5 网格为空\n"
-            "  3. 左侧库存第一个驱动已被选中\n\n"
-            "点击确定后程序将最小化，并切换到「异环」窗口，3 秒后接管虚拟手柄。"
+            "  3. 左侧库存焦点在第一个驱动（程序会自动选中第二个）\n\n"
+            "点击确定后程序将最小化，并切换到「异环」窗口，3 秒后接管虚拟手柄。\n"
+            "调试截图将保存到 accounts/default/test/ 目录。"
         ),
         QMessageBox.Yes | QMessageBox.No,
         QMessageBox.No,
@@ -127,6 +128,7 @@ def _start_assembly_test(self, _role_name: str | None = None):
 def _on_assembly_test_done(self, result):
     self.showNormal()
     self.activateWindow()
+    debug_lines = "\n".join(result.debug_screenshots) if result.debug_screenshots else "（无）"
     QMessageBox.information(
         self,
         "自动装配测试完成",
@@ -135,8 +137,9 @@ def _on_assembly_test_done(self, result):
             f"规划: {result.role_name} / {result.piece_id} → ({result.start_r}, {result.start_c})\n"
             f"拖动段数: {len(result.applied_moves)}\n\n"
             f"拖动前截图:\n{result.before_screenshot}\n\n"
+            f"调试过程截图:\n{debug_lines}\n\n"
             f"拖动后截图:\n{result.after_screenshot}\n\n"
-            "请对比两张截图确认是否落到目标格；若偏差，请调整 config/assembly_calibration.json。"
+            "请对比截图确认位置；分段参数请调整 config/assembly_calibration.json 的 drag_moves。"
         ),
     )
 

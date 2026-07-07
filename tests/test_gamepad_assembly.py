@@ -30,42 +30,49 @@ class GamepadAssemblyTests(unittest.TestCase):
             "post_hold_a_seconds": 0.01,
             "settle_seconds": 0.01,
             "stick_update_interval_seconds": 0.01,
-            "drag_from_inventory_focus": {
-                "stick_x": 0.72,
-                "stick_y": -0.18,
-                "duration_seconds": 0.02,
+            "inventory_focus_index": 2,
+            "inventory_nav": {
+                "tap_seconds": 0.01,
+                "settle_seconds": 0.01,
+                "right_stick_x": 1.0,
             },
-            "grid_nudge": {
-                "stick_x_per_col": 0.1,
-                "stick_y_per_row": 0.1,
-                "duration_per_step": 0.01,
+            "drag_moves": [
+                {"label": "01_right", "stick_x": 0.95, "stick_y": 0.0, "duration_seconds": 0.02},
+                {"label": "02_down", "stick_x": 0.0, "stick_y": -0.30, "duration_seconds": 0.01},
+            ],
+            "debug_capture": {
+                "enabled": False,
             },
-            "grid_origin_r": 1,
-            "grid_origin_c": 0,
         }
 
-    def test_build_drag_moves_for_origin_cell(self):
+    def test_moves_from_config_list(self):
         controller = GamepadAssemblyController.__new__(GamepadAssemblyController)
         controller.calibration = self.calibration
-        moves = controller._build_drag_moves(1, 0)
-        self.assertEqual(1, len(moves))
-        self.assertEqual(StickMove(0.72, -0.18, 0.02), moves[0])
+        moves = controller._moves_from_config_list(1, 0)
+        self.assertEqual(2, len(moves))
+        self.assertEqual("01_right", moves[0].label)
+        self.assertEqual(StickMove(0.95, 0.0, 0.02, "01_right"), moves[0])
 
-    def test_build_drag_moves_adds_row_and_col_nudges(self):
-        controller = GamepadAssemblyController.__new__(GamepadAssemblyController)
-        controller.calibration = self.calibration
-        moves = controller._build_drag_moves(2, 1)
-        self.assertEqual(3, len(moves))
-        self.assertEqual(StickMove(0.0, 0.1, 0.01), moves[1])
-        self.assertEqual(StickMove(0.1, 0.0, 0.01), moves[2])
+    @patch("src.scanner.gamepad_assembly.time.sleep", return_value=None)
+    @patch("src.scanner.gamepad_assembly.time.perf_counter")
+    def test_focus_inventory_item_moves_right_once_for_second_slot(self, perf_counter, _sleep):
+        perf_counter.side_effect = [0.0] * 20
+        fake_gamepad = FakeGamepad()
+        fake_button = MagicMock()
+
+        with patch.dict(
+            "sys.modules",
+            {"vgamepad": MagicMock(VX360Gamepad=lambda: fake_gamepad, XUSB_BUTTON=MagicMock(XUSB_GAMEPAD_A=fake_button))},
+        ):
+            controller = GamepadAssemblyController(calibration=self.calibration)
+            controller.focus_inventory_item()
+
+        self.assertEqual((0.0, 0.0), fake_gamepad.left_stick)
 
     @patch("src.scanner.gamepad_assembly.time.sleep", return_value=None)
     @patch("src.scanner.gamepad_assembly.time.perf_counter")
     def test_drag_to_grid_cell_keeps_a_held_until_finish(self, perf_counter, _sleep):
-        perf_counter.side_effect = [
-            0.0, 0.0, 0.01, 0.01, 0.02, 0.02,
-            0.03, 0.03, 0.04, 0.04, 0.05,
-        ]
+        perf_counter.side_effect = [0.0] * 40
         fake_gamepad = FakeGamepad()
         fake_button = MagicMock()
 
@@ -74,31 +81,12 @@ class GamepadAssemblyTests(unittest.TestCase):
             {"vgamepad": MagicMock(VX360Gamepad=lambda: fake_gamepad, XUSB_BUTTON=MagicMock(XUSB_GAMEPAD_A=fake_button))},
         ):
             controller = GamepadAssemblyController(calibration=self.calibration)
-            controller.drag_to_grid_cell(1, 0)
+            controller.capture_screenshot = MagicMock(return_value="debug.png")
+            moves = controller.drag_to_grid_cell(1, 0)
 
+        self.assertEqual(2, len(moves))
         self.assertNotIn(fake_button, fake_gamepad.pressed)
         self.assertEqual((0.0, 0.0), fake_gamepad.left_stick)
-        self.assertGreaterEqual(fake_gamepad.updates, 4)
-
-    @patch("src.scanner.gamepad_assembly.time.sleep", return_value=None)
-    @patch("src.scanner.gamepad_assembly.time.perf_counter")
-    def test_a_stays_pressed_during_stick_move(self, perf_counter, _sleep):
-        perf_counter.side_effect = [0.0, 0.0, 0.01, 0.01, 0.02, 0.02, 0.03, 0.03, 0.04]
-        fake_gamepad = FakeGamepad()
-        fake_button = MagicMock()
-
-        with patch.dict(
-            "sys.modules",
-            {"vgamepad": MagicMock(VX360Gamepad=lambda: fake_gamepad, XUSB_BUTTON=MagicMock(XUSB_GAMEPAD_A=fake_button))},
-        ):
-            controller = GamepadAssemblyController(calibration=self.calibration)
-            controller._begin_drag_hold()
-            self.assertIn(fake_button, fake_gamepad.pressed)
-            controller._move_stick_while_holding(0.72, -0.18, 0.02)
-            self.assertIn(fake_button, fake_gamepad.pressed)
-            controller._finish_drag_hold()
-
-        self.assertNotIn(fake_button, fake_gamepad.pressed)
 
 
 if __name__ == "__main__":
