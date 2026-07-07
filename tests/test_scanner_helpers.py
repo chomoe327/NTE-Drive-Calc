@@ -742,19 +742,33 @@ class InventoryAssemblyShapeTests(unittest.TestCase):
         from src.features.inventory_import.equipment_classifier import (
             build_inventory_grid_layout,
             find_selected_inventory_cell,
+            load_inventory_selection_triangle,
             locate_shape_in_slot_crop,
         )
+        from src.scanner.config import ScannerConfig
         from src.scanner.shape_recognizer import GoldShapeRecognizer
 
         img = cv2.imread(str(asset))
         self.assertIsNotNone(img)
         height, width = img.shape[:2]
+        _, regions = ScannerConfig.get_region_profiles(width, height)[0]
+        panel_region = regions["inventory_panel"]
+        triangle_template = load_inventory_selection_triangle(
+            "config/templates/inventory_selection_triangle.png"
+        )
+        self.assertIsNotNone(triangle_template)
         grid_layout = build_inventory_grid_layout(width, height)
-        selected = find_selected_inventory_cell(img, grid_layout)
+        selected = find_selected_inventory_cell(
+            img,
+            grid_layout,
+            panel_region,
+            triangle_template,
+        )
         self.assertIsNotNone(selected)
         self.assertEqual(1, selected["slot_index"])
         self.assertEqual(0, selected["slot_row"])
         self.assertEqual(0, selected["slot_col"])
+        self.assertGreaterEqual(selected.get("triangle_confidence", 0.0), 0.80)
 
         recognizer = GoldShapeRecognizer(template_dir="config/templates")
         x1, y1, x2, y2 = selected["selection_box"]

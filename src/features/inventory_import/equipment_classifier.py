@@ -106,6 +106,7 @@ DEFAULT_INVENTORY_GRID = {
     "grid_columns": 4,
     "grid_rows": 5,
 }
+DEFAULT_SELECTION_TRIANGLE_SIZE_2K = (70, 20)
 
 
 def build_inventory_grid_layout(
@@ -152,66 +153,154 @@ def _inventory_cell_box(layout: dict, row: int, col: int) -> tuple[int, int, int
     return x1, y1, x2, y2
 
 
-def _score_inventory_selection_border(cell_crop: np.ndarray) -> float:
-    """Score how strongly a full inventory cell shows the yellow selection frame."""
-    if cell_crop is None or cell_crop.size == 0:
-        return 0.0
+def load_inventory_selection_triangle(template_path: str | os.PathLike[str]) -> np.ndarray | None:
+    path = os.fspath(template_path)
+    if not os.path.exists(path):
+        logger.warning(f"库存选中三角模板不存在: {path}")
+        return None
+    image = cv2.imread(path, cv2.IMREAD_COLOR)
+    if image is None or image.size == 0:
+        logger.warning(f"无法读取库存选中三角模板: {path}")
+        return None
+    return image
 
-    cell_h, cell_w = cell_crop.shape[:2]
-    band = max(2, int(min(cell_h, cell_w) * 0.12))
-    hsv = cv2.cvtColor(cell_crop, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, np.array([10, 100, 150]), np.array([35, 255, 255]))
-    ring = np.zeros((cell_h, cell_w), dtype=bool)
-    ring[:band, :] = True
-    ring[-band:, :] = True
-    ring[:, :band] = True
-    ring[:, -band:] = True
-    ring_pixels = int(ring.sum())
-    if ring_pixels <= 0:
-        return 0.0
-    return float((mask > 0)[ring].sum())
+
+def _match_selection_triangle(
+    img: np.ndarray,
+    panel_region: tuple[int, int, int, int],
+    triangle_template: np.ndarray,
+    *,
+    min_confidence: float = 0.80,
+    triangle_size_2k: tuple[int, int] = DEFAULT_SELECTION_TRIANGLE_SIZE_2K,
+    base_width: int = 2560,
+    base_height: int = 1440,
+) -> dict | None:
+    """Locate the fixed orange selection triangle inside the inventory panel."""
+    from src.scanner.window_capture import scale_region
+
+    x1, y1, x2, y2 = panel_region
+    image_h, image_w = img.shape[:2]
+    x1 = max(0, x1)
+    y1 = max(0, y1)
+    x2 = min(image_w, x2)
+    y2 = min(image_h, y2)
+    search = img[y1:y2, x1:x2]
+    if search is None or search.size == 0 or triangle_template is None or triangle_template.size == 0:
+        return None
+
+    gray = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
+    template = (
+        cv2.cvtColor(triangle_template, cv2.COLOR_BGR2GRAY)
+        if len(triangle_template.shape) == 3
+        else triangle_template
+    )
+    template_h, template_w = template.shape[:2]
+    expected_w, expected_h = triangle_size_2k
+    scaled_size = scale_region(
+        (0, 0, expected_w, expected_h),
+        image_w,
+        image_h,
+        (base_width, base_height),
+    )
+    target_w = max(4, scaled_size[2] - scaled_size[0])
+    target_h = max(3, scaled_size[3] - scaled_size[1])
+    base_scale = min(target_w / max(1, template_w), target_h / max(1, template_h))
+    scales = sorted(
+        {
+            round(base_scale * factor, 2)
+            for factor in (0.85, 0.92, 1.0, 1.08, 1.15)
+            if base_scale * factor > 0.05
+        }
+    )
+
+    best_score = -1.0
+    best_loc = (0, 0)
+    best_size = (template_w, template_h)
+    search_h, search_w = gray.shape[:2]
+    for scale in scales:
+        resized_w = max(4, int(template_w * scale))
+        resized_h = max(3, int(template_h * scale))
+        if resized_w > search_w or resized_h > search_h:
+            continue
+        resized = cv2.resize(template, (resized_w, resized_h))
+        result = cv2.matchTemplate(gray, resized, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+        if max_val > best_score:
+            best_score = float(max_val)
+            best_loc = max_loc
+            best_size = (resized_w, resized_h)
+
+    if best_score < min_confidence:
+        return None
+
+    abs_x = x1 + best_loc[0]
+    abs_y = y1 + best_loc[1]
+    resized_w, resized_h = best_size
+    center_x = abs_x + resized_w // 2
+    bottom_y = abs_y + resized_h
+    return {
+        "confidence": round(best_score, 3),
+        "top_left": (abs_x, abs_y),
+        "size": best_size,
+        "center_x": center_x,
+        "bottom_y": bottom_y,
+    }
+
+
+def _cell_index_from_triangle(
+    triangle_match: dict,
+    grid_layout: dict,
+) -> tuple[int, int]:
+    origin_x = float(grid_layout["origin_x"])
+    origin_y = float(grid_layout["origin_y"])
+    cell_width = float(grid_layout["cell_width"])
+    cell_height = float(grid_layout["cell_height"])
+    columns = int(grid_layout["grid_columns"])
+    rows = int(grid_layout["grid_rows"])
+
+    col = int(round((triangle_match["center_x"] - origin_x - cell_width / 2) / cell_width))
+    row = int(round((triangle_match["bottom_y"] - origin_y) / cell_height))
+    col = max(0, min(columns - 1, col))
+    row = max(0, min(rows - 1, row))
+    return row, col
 
 
 def find_selected_inventory_cell(
     img: np.ndarray,
     grid_layout: dict,
+    panel_region: tuple[int, int, int, int],
+    triangle_template: np.ndarray,
     *,
-    min_border_score: float = 50.0,
-    min_border_margin: float = 15.0,
+    min_triangle_confidence: float = 0.80,
+    triangle_size_2k: tuple[int, int] = DEFAULT_SELECTION_TRIANGLE_SIZE_2K,
+    base_width: int = 2560,
+    base_height: int = 1440,
 ) -> dict | None:
-    """Find the selected inventory slot by yellow border energy on each grid cell."""
-    image_h, image_w = img.shape[:2]
+    """Find the selected inventory slot via the orange triangle indicator above it."""
+    triangle_match = _match_selection_triangle(
+        img,
+        panel_region,
+        triangle_template,
+        min_confidence=min_triangle_confidence,
+        triangle_size_2k=triangle_size_2k,
+        base_width=base_width,
+        base_height=base_height,
+    )
+    if triangle_match is None:
+        return None
+
+    row, col = _cell_index_from_triangle(triangle_match, grid_layout)
+    selection_box = _inventory_cell_box(grid_layout, row, col)
     columns = int(grid_layout["grid_columns"])
-    rows = int(grid_layout["grid_rows"])
-
-    scored_cells: list[tuple[float, int, int, tuple[int, int, int, int]]] = []
-    for row in range(rows):
-        for col in range(columns):
-            x1, y1, x2, y2 = _inventory_cell_box(grid_layout, row, col)
-            if x1 < 0 or y1 < 0 or x2 > image_w or y2 > image_h:
-                continue
-            crop = img[y1:y2, x1:x2]
-            score = _score_inventory_selection_border(crop)
-            scored_cells.append((score, row, col, (x1, y1, x2, y2)))
-
-    if not scored_cells:
-        return None
-
-    scored_cells.sort(key=lambda item: item[0], reverse=True)
-    best_score, best_row, best_col, best_box = scored_cells[0]
-    second_score = scored_cells[1][0] if len(scored_cells) > 1 else 0.0
-    border_margin = best_score - second_score
-    if best_score < min_border_score or border_margin < min_border_margin:
-        return None
-
-    slot_index = best_row * columns + best_col + 1
+    slot_index = row * columns + col + 1
     return {
         "slot_index": slot_index,
-        "slot_row": best_row,
-        "slot_col": best_col,
-        "selection_box": best_box,
-        "border_score": round(best_score, 1),
-        "border_margin": round(border_margin, 1),
+        "slot_row": row,
+        "slot_col": col,
+        "selection_box": selection_box,
+        "triangle_confidence": triangle_match["confidence"],
+        "triangle_top_left": triangle_match["top_left"],
+        "triangle_size": triangle_match["size"],
     }
 
 
@@ -245,15 +334,18 @@ def locate_selected_inventory_shape(
     *,
     grid_layout: dict | None = None,
     grid_cfg: dict | None = None,
+    triangle_template: np.ndarray | None = None,
+    triangle_template_path: str | os.PathLike[str] | None = None,
     base_width: int = 2560,
     base_height: int = 1440,
     min_confidence: float = INVENTORY_SLOT_MIN_CONFIDENCE,
     min_margin: float = INVENTORY_SLOT_MIN_MARGIN,
-    min_border_score: float = 50.0,
-    min_border_margin: float = 15.0,
+    min_triangle_confidence: float = 0.80,
+    triangle_size_2k: tuple[int, int] = DEFAULT_SELECTION_TRIANGLE_SIZE_2K,
 ) -> dict:
     """Detect the highlighted inventory slot and recognize the drive shape inside it."""
-    del panel_region  # kept for API compatibility; grid layout defines slot geometry
+    if panel_region is None:
+        return {"shape_id": "Unknown", "confidence": -1.0}
 
     image_h, image_w = img.shape[:2]
     if grid_layout is None:
@@ -265,11 +357,20 @@ def locate_selected_inventory_shape(
             base_height=base_height,
         )
 
+    if triangle_template is None and triangle_template_path is not None:
+        triangle_template = load_inventory_selection_triangle(triangle_template_path)
+    if triangle_template is None:
+        return {"shape_id": "Unknown", "confidence": -1.0}
+
     selected = find_selected_inventory_cell(
         img,
         grid_layout,
-        min_border_score=min_border_score,
-        min_border_margin=min_border_margin,
+        panel_region,
+        triangle_template,
+        min_triangle_confidence=min_triangle_confidence,
+        triangle_size_2k=triangle_size_2k,
+        base_width=base_width,
+        base_height=base_height,
     )
     if selected is None:
         return {"shape_id": "Unknown", "confidence": -1.0}

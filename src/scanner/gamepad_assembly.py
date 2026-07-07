@@ -16,6 +16,7 @@ import numpy as np
 from src.app import runtime
 from src.features.inventory_import.equipment_classifier import (
     build_inventory_grid_layout,
+    load_inventory_selection_triangle,
     locate_selected_inventory_shape,
 )
 from src.scanner.assembly_vision import (
@@ -87,6 +88,7 @@ class GamepadAssemblyController:
         self._debug_screenshots: list[str] = []
         self._debug_counter = 0
         self._shape_recognizer: GoldShapeRecognizer | None = None
+        self._selection_triangle_template = None
         logger.info("正在连接虚拟 Xbox 360 手柄（装配测试）...")
         try:
             import vgamepad as vg
@@ -137,6 +139,18 @@ class GamepadAssemblyController:
 
     def _inventory_grid_cfg(self) -> dict:
         return self.calibration.get("inventory_grid", {}) or {}
+
+    def _get_selection_triangle_template(self):
+        if self._selection_triangle_template is None:
+            search_cfg = self._inventory_search_cfg()
+            template_name = str(
+                search_cfg.get("selection_triangle_template", "inventory_selection_triangle.png")
+                or "inventory_selection_triangle.png"
+            )
+            template_dir = runtime.TEMPLATE_DIR or runtime.CONFIG_DIR / "templates"
+            template_path = Path(template_dir) / template_name
+            self._selection_triangle_template = load_inventory_selection_triangle(template_path)
+        return self._selection_triangle_template
 
     def _inventory_grid_layout(self, image: np.ndarray) -> dict:
         image_h, image_w = image.shape[:2]
@@ -214,10 +228,16 @@ class GamepadAssemblyController:
         search_cfg = self._inventory_search_cfg()
         min_confidence = float(search_cfg.get("min_confidence", 0.65) or 0.65)
         min_margin = float(search_cfg.get("min_margin", 0.05) or 0.05)
-        min_border_score = float(search_cfg.get("selection_min_border_score", 50.0) or 50.0)
-        min_border_margin = float(search_cfg.get("selection_min_border_margin", 15.0) or 15.0)
+        min_triangle_confidence = float(
+            search_cfg.get("selection_min_triangle_confidence", 0.80) or 0.80
+        )
+        triangle_size_cfg = search_cfg.get("selection_triangle_size_2k") or [70, 20]
+        triangle_size_2k = (int(triangle_size_cfg[0]), int(triangle_size_cfg[1]))
+        base_width = int(self.calibration.get("base_width", 2560) or 2560)
+        base_height = int(self.calibration.get("base_height", 1440) or 1440)
         panel_region = self._inventory_panel_region()
         grid_layout = self._inventory_grid_layout(image)
+        triangle_template = self._get_selection_triangle_template()
         recognizer = self._get_shape_recognizer()
         candidate_ids = [shape_id] if shape_id else None
         templates = recognizer.templates
@@ -232,17 +252,21 @@ class GamepadAssemblyController:
             image,
             panel_region,
             grid_layout=grid_layout,
+            triangle_template=triangle_template,
             min_confidence=min_confidence,
             min_margin=0.0 if candidate_ids else min_margin,
-            min_border_score=min_border_score,
-            min_border_margin=min_border_margin,
+            min_triangle_confidence=min_triangle_confidence,
+            triangle_size_2k=triangle_size_2k,
+            base_width=base_width,
+            base_height=base_height,
         )
         if result.get("selection_box"):
             x1, y1, x2, y2 = result["selection_box"]
+            triangle_top_left = result.get("triangle_top_left")
             logger.debug(
                 f"库存选中框: ({x1}, {y1})-({x2}, {y2}) "
-                f"border={result.get('border_score')} "
-                f"border_margin={result.get('border_margin')} "
+                f"triangle={triangle_top_left} "
+                f"triangle_conf={result.get('triangle_confidence')} "
                 f"shape_margin={result.get('margin')} "
                 f"second={result.get('second_best_confidence')}"
             )
@@ -287,6 +311,7 @@ class GamepadAssemblyController:
         recognition = self._recognize_selected_drive_shape(shape_id)
         logger.info(
             f"{self._format_selected_slot_log(recognition)} | "
+            f"triangle_conf={recognition.get('triangle_confidence')} "
             f"shape={recognition.get('shape_id')} "
             f"confidence={recognition.get('confidence')} "
             f"margin={recognition.get('margin')}"
@@ -308,6 +333,7 @@ class GamepadAssemblyController:
             recognition = self._recognize_selected_drive_shape(shape_id)
             logger.info(
                 f"  {self._format_selected_slot_log(recognition)} | "
+                f"triangle_conf={recognition.get('triangle_confidence')} "
                 f"shape={recognition.get('shape_id')} "
                 f"confidence={recognition.get('confidence')} "
                 f"margin={recognition.get('margin')}"
