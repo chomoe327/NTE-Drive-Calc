@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QMessageBox
 
 from src.app import runtime
 from src.app.workers import WorkerThread
-from src.scanner.assembly_planner import plan_test_placement
+from src.scanner.assembly_planner import ASSEMBLY_TEST_ROLE, ASSEMBLY_TEST_SHAPE, plan_assembly
 from src.scanner.gamepad_assembly import load_assembly_calibration, run_assembly_drag_test
 from src.scanner.window_control import (
     WindowControlError,
@@ -61,13 +61,16 @@ def _start_assembly_test(self, _role_name: str | None = None):
         "自动装配测试",
         (
             "本阶段为原型测试，固定执行：\n"
-            "  角色：真红\n"
-            "  驱动块：H_2\n"
-            "  目标格：(1, 0)\n\n"
+            f"  角色：{ASSEMBLY_TEST_ROLE}（读取已保存配装图纸）\n"
+            f"  驱动块：{ASSEMBLY_TEST_SHAPE}（库存中第一个匹配形状）\n"
+            "  目标格：配装图纸中 H_2 的位置\n\n"
             "请先确保：\n"
-            "  1. 游戏已在真红驱动装配页\n"
+            "  1. 游戏已在驱动装配页（真红/九原格子相同，当前页面均可）\n"
             "  2. 中间 5×5 网格为空\n"
-            "  3. 左侧库存焦点在第一个驱动（程序会先唤醒手柄，再右移选中第二个）\n\n"
+            "  3. 左侧库存焦点在第一个驱动\n"
+            f"  4. 配装页已保存 {ASSEMBLY_TEST_ROLE} 的统筹方案\n\n"
+            "程序会先唤醒手柄，再通过右侧详情面板的形状识别搜索目标驱动，"
+            "不会按固定格数导航。\n"
             "点击确定后程序将最小化，并切换到「异环」窗口，3 秒后接管虚拟手柄。\n"
             "调试截图将保存到 accounts/default/test/ 目录。"
         ),
@@ -94,14 +97,15 @@ def _start_assembly_test(self, _role_name: str | None = None):
     self.showMinimized()
 
     def _run_test():
-        plan = plan_test_placement(
-            role_name="真红",
-            piece_id="H_2",
+        plan = plan_assembly(
+            role_name=ASSEMBLY_TEST_ROLE,
+            piece_id=ASSEMBLY_TEST_SHAPE,
             config_dir=_resolve_config_dir(),
         )
+        inventory_uid = (plan.inventory_drive or {}).get("uid", "（未在 real_inventory 中找到）")
         logger.info(
             f"装配测试规划结果: role={plan.role_name} piece={plan.piece_id} "
-            f"start=({plan.start_r}, {plan.start_c})"
+            f"start=({plan.start_r}, {plan.start_c}) inventory_uid={inventory_uid}"
         )
 
         if not is_window_foreground(target_hwnd):

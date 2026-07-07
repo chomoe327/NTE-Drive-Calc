@@ -8,12 +8,17 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import cv2
 import mss
 import mss.tools
+import numpy as np
 
 from src.app import runtime
+from src.features.inventory_import.equipment_classifier import locate_shape_in_image
+from src.scanner.config import ScannerConfig
 from src.scanner.gamepad_controller import ViGEmDriverNotReadyError, _format_vigem_error
-from src.scanner.window_capture import capture_foreground_window
+from src.scanner.shape_recognizer import ShapeRecognizer
+from src.scanner.window_capture import capture_foreground_window, get_foreground_client_rect
 from src.utils.logger import logger
 
 
@@ -54,6 +59,10 @@ def assembly_test_dir() -> Path:
     return output_dir
 
 
+class InventoryDriveNotFoundError(RuntimeError):
+    """Raised when shape-based inventory search cannot find the target drive."""
+
+
 class GamepadAssemblyController:
     """Drive-block drag controller built on top of ViGEm virtual gamepad."""
 
@@ -66,6 +75,7 @@ class GamepadAssemblyController:
         self._debug_enabled = bool(self._debug_cfg.get("enabled", True))
         self._debug_screenshots: list[str] = []
         self._debug_counter = 0
+        self._shape_recognizer: ShapeRecognizer | None = None
         logger.info("正在连接虚拟 Xbox 360 手柄（装配测试）...")
         try:
             import vgamepad as vg
@@ -108,8 +118,14 @@ class GamepadAssemblyController:
         self.gamepad.left_joystick_float(x_value_float=0.0, y_value_float=0.0)
         self.gamepad.update()
 
+    def _inventory_nav_cfg(self) -> dict:
+        return self.calibration.get("inventory_nav", {}) or {}
+
+    def _inventory_search_cfg(self) -> dict:
+        return self.calibration.get("inventory_search", {}) or {}
+
     def _tap_left_stick(self, stick_x: float, stick_y: float) -> None:
-        nav = self.calibration.get("inventory_nav", {}) or {}
+        nav = self._inventory_nav_cfg()
         tap_seconds = float(nav.get("tap_seconds", 0.10) or 0.10)
         settle_seconds = float(nav.get("settle_seconds", 0.25) or 0.25)
         self.gamepad.left_joystick_float(x_value_float=float(stick_x), y_value_float=float(stick_y))
@@ -117,6 +133,50 @@ class GamepadAssemblyController:
         time.sleep(tap_seconds)
         self._reset_stick()
         time.sleep(settle_seconds)
+
+    def _tap_inventory_right(self) -> None:
+        nav = self._inventory_nav_cfg()
+        right_stick_x = float(nav.get("right_stick_x", 1.0) or 1.0)
+        self._tap_left_stick(right_stick_x, 0.0)
+
+    def _tap_inventory_down(self) -> None:
+        nav = self._inventory_nav_cfg()
+        down_stick_y = float(nav.get("down_stick_y", -1.0) or -1.0)
+        self._tap_left_stick(0.0, down_stick_y)
+
+    def _get_shape_recognizer(self) -> ShapeRecognizer:
+        if self._shape_recognizer is None:
+            template_dir = str(runtime.TEMPLATE_DIR or runtime.CONFIG_DIR / "templates")
+            self._shape_recognizer = ShapeRecognizer(template_dir=template_dir)
+        return self._shape_recognizer
+
+    def _capture_foreground_bgr(self) -> np.ndarray:
+        with mss.MSS() as sct:
+            screenshot, _ = capture_foreground_window(sct)
+        image = np.array(screenshot)
+        if image.ndim == 3 and image.shape[2] == 4:
+            return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+        if image.ndim == 3 and image.shape[2] == 3:
+            return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        return image
+
+    def _drive_shape_icon_region(self) -> tuple[int, int, int, int]:
+        rect = get_foreground_client_rect()
+        profiles = ScannerConfig.get_region_profiles(rect.width, rect.height)
+        _, regions = profiles[0]
+        return regions["drive_shape_icon"]
+
+    def _recognize_selected_drive_shape(self) -> dict:
+        image = self._capture_foreground_bgr()
+        region = self._drive_shape_icon_region()
+        return locate_shape_in_image(self._get_shape_recognizer(), image, region)
+
+    def _selection_matches_target(self, shape_id: str, recognition: dict) -> bool:
+        search_cfg = self._inventory_search_cfg()
+        min_confidence = float(search_cfg.get("min_confidence", 0.58) or 0.58)
+        detected = str(recognition.get("shape_id") or "Unknown")
+        confidence = float(recognition.get("confidence") or -1.0)
+        return detected == shape_id and confidence >= min_confidence
 
     def _wake_gamepad(self) -> None:
         """Send a disposable stick tap so the game binds the virtual gamepad input."""
@@ -139,24 +199,44 @@ class GamepadAssemblyController:
         time.sleep(settle_seconds)
         self._capture_debug("after_gamepad_wake")
 
-    def focus_inventory_item(self) -> None:
-        """Navigate from the first inventory slot to the configured focus index."""
-        target_index = max(1, int(self.calibration.get("inventory_focus_index", 1) or 1))
-        self._wake_gamepad()
-        if target_index <= 1:
-            logger.info("库存焦点已在第 1 个驱动，无需导航。")
-            return
+    def select_inventory_drive_by_shape(self, shape_id: str) -> dict:
+        """Search the inventory by recognizing the currently selected drive shape."""
+        search_cfg = self._inventory_search_cfg()
+        max_steps = max(1, int(search_cfg.get("max_steps", 20) or 20))
+        grid_columns = max(1, int(search_cfg.get("grid_columns", 4) or 4))
 
-        nav = self.calibration.get("inventory_nav", {}) or {}
-        right_stick_x = float(nav.get("right_stick_x", 1.0) or 1.0)
-        steps = target_index - 1
+        self._wake_gamepad()
+        recognition = self._recognize_selected_drive_shape()
         logger.info(
-            f"库存导航: 唤醒后从第 1 个驱动右移 {steps} 格，选中第 {target_index} 个驱动。"
+            f"库存形状识别: shape={recognition.get('shape_id')} "
+            f"confidence={recognition.get('confidence')}"
         )
-        for step in range(steps):
-            logger.info(f"  [库存导航 {step + 1}/{steps}] stick_x={right_stick_x:.3f}")
-            self._tap_left_stick(right_stick_x, 0.0)
-        self._capture_debug("after_inventory_focus")
+        if self._selection_matches_target(shape_id, recognition):
+            logger.info(f"当前选中驱动已是目标形状 {shape_id}，无需继续搜索。")
+            self._capture_debug("after_inventory_search")
+            return recognition
+
+        for step in range(1, max_steps + 1):
+            if step % grid_columns == 0:
+                logger.info(f"  [库存搜索 {step}/{max_steps}] 下移一行")
+                self._tap_inventory_down()
+            else:
+                logger.info(f"  [库存搜索 {step}/{max_steps}] 右移一格")
+                self._tap_inventory_right()
+
+            recognition = self._recognize_selected_drive_shape()
+            logger.info(
+                f"  识别结果: shape={recognition.get('shape_id')} "
+                f"confidence={recognition.get('confidence')}"
+            )
+            if self._selection_matches_target(shape_id, recognition):
+                logger.success(f"已找到目标形状 {shape_id}。")
+                self._capture_debug("after_inventory_search")
+                return recognition
+
+        raise InventoryDriveNotFoundError(
+            f"在库存中未找到形状为 {shape_id} 的驱动块（已搜索 {max_steps} 步）。"
+        )
 
     def _send_drag_input(self, stick_x: float, stick_y: float) -> None:
         if not self._drag_active:
@@ -291,13 +371,13 @@ class GamepadAssemblyController:
             )
         return moves
 
-    def drag_to_grid_cell(self, start_r: int, start_c: int) -> list[StickMove]:
+    def drag_to_grid_cell(self, start_r: int, start_c: int, piece_id: str = "H_2") -> list[StickMove]:
         moves = self._moves_from_config_list(start_r, start_c)
         logger.info(
             f"开始拖动到网格 ({start_r}, {start_c})，共 {len(moves)} 段摇杆动作。"
         )
 
-        self.focus_inventory_item()
+        self.select_inventory_drive_by_shape(piece_id)
         self._begin_drag_hold()
         try:
             for index, move in enumerate(moves, 1):
@@ -324,13 +404,14 @@ def run_assembly_drag_test(
     delay_seconds: float = 3.0,
     calibration: dict | None = None,
 ) -> AssemblyTestResult:
-    controller = GamepadAssemblyController(calibration=calibration)
+    merged_calibration = dict(calibration or load_assembly_calibration())
+    controller = GamepadAssemblyController(calibration=merged_calibration)
     before_path = controller.capture_screenshot("assembly_test_before.png")
 
     logger.warning(f"装配测试将在 {delay_seconds:.1f} 秒后接管控制，请保持游戏界面不动。")
     time.sleep(max(0.0, float(delay_seconds)))
 
-    applied_moves = controller.drag_to_grid_cell(start_r, start_c)
+    applied_moves = controller.drag_to_grid_cell(start_r, start_c, piece_id=piece_id)
     after_path = controller.capture_screenshot("assembly_test_after.png")
     return AssemblyTestResult(
         role_name=role_name,

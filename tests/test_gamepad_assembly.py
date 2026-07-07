@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from src.scanner.gamepad_assembly import GamepadAssemblyController, StickMove
+from src.scanner.gamepad_assembly import GamepadAssemblyController, InventoryDriveNotFoundError, StickMove
 
 
 class FakeGamepad:
@@ -30,11 +30,16 @@ class GamepadAssemblyTests(unittest.TestCase):
             "post_hold_a_seconds": 0.01,
             "settle_seconds": 0.01,
             "stick_update_interval_seconds": 0.01,
-            "inventory_focus_index": 2,
             "inventory_nav": {
                 "tap_seconds": 0.01,
                 "settle_seconds": 0.01,
                 "right_stick_x": 1.0,
+                "down_stick_y": -1.0,
+            },
+            "inventory_search": {
+                "max_steps": 4,
+                "grid_columns": 4,
+                "min_confidence": 0.58,
             },
             "drag_moves": [
                 {"label": "01_right", "stick_x": 0.95, "stick_y": 0.0, "duration_seconds": 0.02},
@@ -53,7 +58,7 @@ class GamepadAssemblyTests(unittest.TestCase):
         self.assertEqual("01_right", moves[0].label)
         self.assertEqual(StickMove(0.95, 0.0, 0.02, "01_right"), moves[0])
 
-    def test_focus_inventory_item_wakes_before_navigating(self):
+    def test_select_inventory_drive_wakes_before_search(self):
         calibration = dict(self.calibration)
         calibration["debug_capture"] = {"enabled": False}
         fake_gamepad = FakeGamepad()
@@ -64,12 +69,17 @@ class GamepadAssemblyTests(unittest.TestCase):
         ):
             controller = GamepadAssemblyController(calibration=calibration)
             controller._wake_gamepad = MagicMock()
-            controller._tap_left_stick = MagicMock()
+            controller._tap_inventory_right = MagicMock()
+            controller._tap_inventory_down = MagicMock()
+            controller._recognize_selected_drive_shape = MagicMock(
+                return_value={"shape_id": "H_2", "confidence": 0.92}
+            )
             controller._capture_debug = MagicMock()
-            controller.focus_inventory_item()
+            result = controller.select_inventory_drive_by_shape("H_2")
 
         controller._wake_gamepad.assert_called_once()
-        controller._tap_left_stick.assert_called_once()
+        controller._tap_inventory_right.assert_not_called()
+        self.assertEqual("H_2", result["shape_id"])
 
     @patch("src.scanner.gamepad_assembly.time.sleep", return_value=None)
     def test_wake_gamepad_sends_stick_tap(self, _sleep):
@@ -86,21 +96,46 @@ class GamepadAssemblyTests(unittest.TestCase):
 
         self.assertEqual((0.0, 0.0), fake_gamepad.left_stick)
 
-    @patch("src.scanner.gamepad_assembly.time.sleep", return_value=None)
-    @patch("src.scanner.gamepad_assembly.time.perf_counter")
-    def test_focus_inventory_item_moves_right_once_for_second_slot(self, perf_counter, _sleep):
-        perf_counter.side_effect = [0.0] * 20
+    def test_select_inventory_drive_moves_until_shape_matches(self):
         fake_gamepad = FakeGamepad()
-        fake_button = MagicMock()
+        recognitions = [
+            {"shape_id": "V_2", "confidence": 0.90},
+            {"shape_id": "L_3_BL", "confidence": 0.88},
+            {"shape_id": "H_2", "confidence": 0.91},
+        ]
 
         with patch.dict(
             "sys.modules",
-            {"vgamepad": MagicMock(VX360Gamepad=lambda: fake_gamepad, XUSB_BUTTON=MagicMock(XUSB_GAMEPAD_A=fake_button))},
+            {"vgamepad": MagicMock(VX360Gamepad=lambda: fake_gamepad, XUSB_BUTTON=MagicMock())},
         ):
             controller = GamepadAssemblyController(calibration=self.calibration)
-            controller.focus_inventory_item()
+            controller._wake_gamepad = MagicMock()
+            controller._capture_debug = MagicMock()
+            controller._recognize_selected_drive_shape = MagicMock(side_effect=recognitions)
+            controller._tap_inventory_right = MagicMock()
+            controller._tap_inventory_down = MagicMock()
+            result = controller.select_inventory_drive_by_shape("H_2")
 
-        self.assertEqual((0.0, 0.0), fake_gamepad.left_stick)
+        self.assertEqual("H_2", result["shape_id"])
+        self.assertEqual(2, controller._tap_inventory_right.call_count)
+
+    def test_select_inventory_drive_raises_when_not_found(self):
+        fake_gamepad = FakeGamepad()
+
+        with patch.dict(
+            "sys.modules",
+            {"vgamepad": MagicMock(VX360Gamepad=lambda: fake_gamepad, XUSB_BUTTON=MagicMock())},
+        ):
+            controller = GamepadAssemblyController(calibration=self.calibration)
+            controller._wake_gamepad = MagicMock()
+            controller._capture_debug = MagicMock()
+            controller._recognize_selected_drive_shape = MagicMock(
+                return_value={"shape_id": "V_2", "confidence": 0.90}
+            )
+            controller._tap_inventory_right = MagicMock()
+            controller._tap_inventory_down = MagicMock()
+            with self.assertRaises(InventoryDriveNotFoundError):
+                controller.select_inventory_drive_by_shape("H_2")
 
     @patch("src.scanner.gamepad_assembly.time.sleep", return_value=None)
     @patch("src.scanner.gamepad_assembly.time.perf_counter")
@@ -115,11 +150,15 @@ class GamepadAssemblyTests(unittest.TestCase):
         ):
             controller = GamepadAssemblyController(calibration=self.calibration)
             controller.capture_screenshot = MagicMock(return_value="debug.png")
-            moves = controller.drag_to_grid_cell(1, 0)
+            controller.select_inventory_drive_by_shape = MagicMock(
+                return_value={"shape_id": "H_2", "confidence": 0.95}
+            )
+            moves = controller.drag_to_grid_cell(1, 0, piece_id="H_2")
 
         self.assertEqual(2, len(moves))
         self.assertNotIn(fake_button, fake_gamepad.pressed)
         self.assertEqual((0.0, 0.0), fake_gamepad.left_stick)
+        controller.select_inventory_drive_by_shape.assert_called_once_with("H_2")
 
 
 if __name__ == "__main__":
