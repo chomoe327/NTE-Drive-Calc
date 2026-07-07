@@ -11,6 +11,8 @@ class ScannerConfig:
     REGIONS_2K = {
         "identity_check": (2000, 330, 2250, 377),
 
+        "inventory_panel": (20, 200, 620, 1020),
+
         "drive_sub_stats": (1801, 819, 2200, 1063),
         "drive_shape_icon": (1762, 350, 2012, 590),
 

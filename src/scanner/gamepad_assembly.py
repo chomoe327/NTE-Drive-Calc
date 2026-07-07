@@ -14,7 +14,7 @@ import mss.tools
 import numpy as np
 
 from src.app import runtime
-from src.features.inventory_import.equipment_classifier import locate_shape_in_image
+from src.features.inventory_import.equipment_classifier import locate_selected_inventory_shape
 from src.scanner.config import ScannerConfig
 from src.scanner.gamepad_controller import ViGEmDriverNotReadyError, _format_vigem_error
 from src.scanner.shape_recognizer import ShapeRecognizer
@@ -160,16 +160,30 @@ class GamepadAssemblyController:
             return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
         return image
 
-    def _drive_shape_icon_region(self) -> tuple[int, int, int, int]:
+    def _inventory_panel_region(self) -> tuple[int, int, int, int]:
         rect = get_foreground_client_rect()
         profiles = ScannerConfig.get_region_profiles(rect.width, rect.height)
         _, regions = profiles[0]
-        return regions["drive_shape_icon"]
+        return regions["inventory_panel"]
 
     def _recognize_selected_drive_shape(self) -> dict:
         image = self._capture_foreground_bgr()
-        region = self._drive_shape_icon_region()
-        return locate_shape_in_image(self._get_shape_recognizer(), image, region)
+        search_cfg = self._inventory_search_cfg()
+        min_confidence = float(search_cfg.get("min_confidence", 0.58) or 0.58)
+        panel_region = self._inventory_panel_region()
+        result = locate_selected_inventory_shape(
+            self._get_shape_recognizer(),
+            image,
+            panel_region,
+            min_confidence=min_confidence,
+        )
+        if result.get("selection_box"):
+            x1, y1, x2, y2 = result["selection_box"]
+            logger.debug(
+                f"库存选中框: ({x1}, {y1})-({x2}, {y2}) "
+                f"matrix={result.get('matrix_size')}"
+            )
+        return result
 
     def _selection_matches_target(self, shape_id: str, recognition: dict) -> bool:
         search_cfg = self._inventory_search_cfg()

@@ -724,6 +724,35 @@ class EquipmentClassifierTests(unittest.TestCase):
         self.assertEqual(1, processor.ocr_engine.calls)
 
 
+class InventoryAssemblyShapeTests(unittest.TestCase):
+    def test_locate_selected_inventory_shape_on_assembly_screenshot(self):
+        import cv2
+        asset = Path(
+            "/Users/chomoe/.cursor/projects/Users-chomoe-projects-personal-NTE-Drive-Calc/assets/"
+            "assembly_test_01_after_gamepad_wake-0477cb18-7f39-4fb5-a035-e91c32c00a75.png"
+        )
+        if not asset.exists():
+            self.skipTest("assembly debug screenshot not available")
+
+        from src.features.inventory_import.equipment_classifier import locate_selected_inventory_shape
+        from src.scanner.shape_recognizer import ShapeRecognizer
+
+        img = cv2.imread(str(asset))
+        self.assertIsNotNone(img)
+        height, width = img.shape[:2]
+        panel = (
+            int(20 * width / 2560),
+            int(200 * height / 1440),
+            int(620 * width / 2560),
+            int(1020 * height / 1440),
+        )
+        recognizer = ShapeRecognizer(template_dir="config/templates")
+        result = locate_selected_inventory_shape(recognizer, img, panel)
+        self.assertEqual("H_2", result["shape_id"])
+        self.assertGreaterEqual(result["confidence"], 0.58)
+        self.assertIn("selection_box", result)
+
+
 class IncrementalBaselineTests(unittest.TestCase):
     def test_corrupt_raw_drive_0001_marks_incremental_baseline_unusable(self):
         with tempfile.TemporaryDirectory() as tmp:
