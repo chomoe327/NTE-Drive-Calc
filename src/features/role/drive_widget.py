@@ -39,6 +39,7 @@ def build_drive_group(
         role_name: str,
         role_data: dict,
         on_details_callback,
+        on_auto_assembly_callback=None,
 ):
     group_drive = QGroupBox("空幕加成")
     drive_layout = QVBoxLayout(group_drive)
@@ -48,6 +49,7 @@ def build_drive_group(
     group_drive._role_name = role_name
     group_drive._role_data = role_data
     group_drive._on_details_callback = on_details_callback
+    group_drive._on_auto_assembly_callback = on_auto_assembly_callback
 
     _build_drive_group_content(group_drive)
 
@@ -64,6 +66,7 @@ def _build_drive_group_content(group_drive):
     role_name = group_drive._role_name
     role_data = group_drive._role_data
     on_details_callback = group_drive._on_details_callback
+    on_auto_assembly_callback = group_drive._on_auto_assembly_callback
 
     drive_data = role_data.get("drive", {})
     all_drives = drive_data.get("drives", [])
@@ -141,10 +144,18 @@ def _build_drive_group_content(group_drive):
     else:
         layout.addWidget(QLabel("（暂无驱动/卡带，首次使用需要执行计算后在 配装 页面点击 导入 对应角色）"))
 
+    action_row = QHBoxLayout()
     btn_detail = QPushButton("查看驱动详情")
     btn_detail.setObjectName("btnSecondary")
     btn_detail.clicked.connect(on_details_callback)
-    layout.addWidget(btn_detail)
+    action_row.addWidget(btn_detail)
+    if callable(on_auto_assembly_callback):
+        btn_auto = QPushButton("自动装配")
+        btn_auto.setObjectName("btnPrimary")
+        btn_auto.clicked.connect(lambda _checked=False, rn=role_name: on_auto_assembly_callback(rn))
+        action_row.addWidget(btn_auto)
+    action_row.addStretch()
+    layout.addLayout(action_row)
 
     _update_total_margin()
 

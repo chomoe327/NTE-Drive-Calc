@@ -1,0 +1,21 @@
+{
+    "base_width": 2560,
+    "base_height": 1440,
+    "title_candidates": ["异环"],
+    "pre_activate_delay_seconds": 0.5,
+    "hold_a_seconds": 0.35,
+    "settle_seconds": 0.20,
+    "stick_update_interval_seconds": 0.05,
+    "drag_from_inventory_focus": {
+        "stick_x": 0.0,
+        "stick_y": -0.55,
+        "duration_seconds": 1.0
+    },
+    "grid_nudge": {
+        "stick_x_per_col": 0.08,
+        "stick_y_per_row": 0.08,
+        "duration_per_step": 0.12
+    },
+    "grid_origin_r": 1,
+    "grid_origin_c": 0
+}

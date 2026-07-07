@@ -37,7 +37,8 @@ APP_NAME = "NTE Drive Calc"
 APP_EXE_NAME = "NTE_Drive_Calc.exe"
 APP_ID = "{{D7DA28BE-8A19-4E05-9216-3F16C4C2C820}"
 CORE_CONFIG_FILES = ("roles.json", "sets.json", "stats.json", "shapes.json",
-                     "my_roles_model.json", "tapes.json", "weapons.json")
+                     "my_roles_model.json", "tapes.json", "weapons.json",
+                     "assembly_calibration.json")
 
 
 def _run(cmd: list[str], cwd: Path = ROOT) -> None:

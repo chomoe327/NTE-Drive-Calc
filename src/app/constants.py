@@ -14,7 +14,8 @@ NETDISK_DOWNLOAD_LINKS = (
 )
 
 CORE_CONFIG_FILES = ("roles.json", "sets.json", "shapes.json", "stats.json",
-                     "my_roles_model.json", "tapes.json", "weapons.json")
+                     "my_roles_model.json", "tapes.json", "weapons.json",
+                     "assembly_calibration.json")
 USER_DATA_FILES = ("equipped_state.json", "real_inventory.json")
 ACCOUNT_USER_FILES = (
     "equipped_state.json", "real_inventory.json", "priority_config.json",
