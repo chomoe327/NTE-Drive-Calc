@@ -8,6 +8,13 @@
     "settle_seconds": 0.25,
     "stick_update_interval_seconds": 0.05,
     "inventory_focus_index": 2,
+    "gamepad_wake": {
+        "enabled": true,
+        "stick_x": 1.0,
+        "stick_y": 0.0,
+        "tap_seconds": 0.12,
+        "settle_seconds": 0.50
+    },
     "inventory_nav": {
         "tap_seconds": 0.10,
         "settle_seconds": 0.25,
@@ -16,15 +23,15 @@
     "drag_moves": [
         {
             "label": "01_right",
-            "stick_x": 0.95,
-            "stick_y": 0.0,
-            "duration_seconds": 1.10
+            "stick_x": 0.78,
+            "stick_y": -0.05,
+            "duration_seconds": 0.95
         },
         {
             "label": "02_down",
             "stick_x": 0.0,
-            "stick_y": -0.30,
-            "duration_seconds": 0.50
+            "stick_y": -0.35,
+            "duration_seconds": 0.55
         }
     ],
     "grid_nudge": {
@@ -36,6 +43,7 @@
     "grid_origin_c": 0,
     "debug_capture": {
         "enabled": true,
+        "after_gamepad_wake": true,
         "after_inventory_focus": true,
         "after_pickup": true,
         "after_each_move": true,

@@ -53,6 +53,39 @@ class GamepadAssemblyTests(unittest.TestCase):
         self.assertEqual("01_right", moves[0].label)
         self.assertEqual(StickMove(0.95, 0.0, 0.02, "01_right"), moves[0])
 
+    def test_focus_inventory_item_wakes_before_navigating(self):
+        calibration = dict(self.calibration)
+        calibration["debug_capture"] = {"enabled": False}
+        fake_gamepad = FakeGamepad()
+
+        with patch.dict(
+            "sys.modules",
+            {"vgamepad": MagicMock(VX360Gamepad=lambda: fake_gamepad, XUSB_BUTTON=MagicMock())},
+        ):
+            controller = GamepadAssemblyController(calibration=calibration)
+            controller._wake_gamepad = MagicMock()
+            controller._tap_left_stick = MagicMock()
+            controller._capture_debug = MagicMock()
+            controller.focus_inventory_item()
+
+        controller._wake_gamepad.assert_called_once()
+        controller._tap_left_stick.assert_called_once()
+
+    @patch("src.scanner.gamepad_assembly.time.sleep", return_value=None)
+    def test_wake_gamepad_sends_stick_tap(self, _sleep):
+        calibration = dict(self.calibration)
+        calibration["debug_capture"] = {"enabled": False}
+        fake_gamepad = FakeGamepad()
+
+        with patch.dict(
+            "sys.modules",
+            {"vgamepad": MagicMock(VX360Gamepad=lambda: fake_gamepad, XUSB_BUTTON=MagicMock())},
+        ):
+            controller = GamepadAssemblyController(calibration=calibration)
+            controller._wake_gamepad()
+
+        self.assertEqual((0.0, 0.0), fake_gamepad.left_stick)
+
     @patch("src.scanner.gamepad_assembly.time.sleep", return_value=None)
     @patch("src.scanner.gamepad_assembly.time.perf_counter")
     def test_focus_inventory_item_moves_right_once_for_second_slot(self, perf_counter, _sleep):

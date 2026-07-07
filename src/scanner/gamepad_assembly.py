@@ -118,9 +118,31 @@ class GamepadAssemblyController:
         self._reset_stick()
         time.sleep(settle_seconds)
 
+    def _wake_gamepad(self) -> None:
+        """Send a disposable stick tap so the game binds the virtual gamepad input."""
+        wake = self.calibration.get("gamepad_wake", {}) or {}
+        if not wake.get("enabled", True):
+            return
+
+        stick_x = float(wake.get("stick_x", 1.0) or 1.0)
+        stick_y = float(wake.get("stick_y", 0.0) or 0.0)
+        tap_seconds = float(wake.get("tap_seconds", 0.12) or 0.12)
+        settle_seconds = float(wake.get("settle_seconds", 0.50) or 0.50)
+        logger.info(
+            f"发送虚拟手柄唤醒信号（此输入可能被游戏消耗，不会移动库存焦点）: "
+            f"stick=({stick_x:.3f}, {stick_y:.3f})"
+        )
+        self.gamepad.left_joystick_float(x_value_float=stick_x, y_value_float=stick_y)
+        self.gamepad.update()
+        time.sleep(tap_seconds)
+        self._reset_stick()
+        time.sleep(settle_seconds)
+        self._capture_debug("after_gamepad_wake")
+
     def focus_inventory_item(self) -> None:
         """Navigate from the first inventory slot to the configured focus index."""
         target_index = max(1, int(self.calibration.get("inventory_focus_index", 1) or 1))
+        self._wake_gamepad()
         if target_index <= 1:
             logger.info("库存焦点已在第 1 个驱动，无需导航。")
             return
@@ -128,7 +150,9 @@ class GamepadAssemblyController:
         nav = self.calibration.get("inventory_nav", {}) or {}
         right_stick_x = float(nav.get("right_stick_x", 1.0) or 1.0)
         steps = target_index - 1
-        logger.info(f"库存导航: 从第 1 个驱动右移 {steps} 格，选中第 {target_index} 个驱动。")
+        logger.info(
+            f"库存导航: 唤醒后从第 1 个驱动右移 {steps} 格，选中第 {target_index} 个驱动。"
+        )
         for step in range(steps):
             logger.info(f"  [库存导航 {step + 1}/{steps}] stick_x={right_stick_x:.3f}")
             self._tap_left_stick(right_stick_x, 0.0)
