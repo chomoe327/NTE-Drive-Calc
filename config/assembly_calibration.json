@@ -24,7 +24,16 @@
         "max_steps": 20,
         "grid_columns": 4,
         "min_confidence": 0.65,
-        "min_margin": 0.05
+        "min_margin": 0.05,
+        "post_move_delay_seconds": 0.40,
+        "selection_min_border_score": 50.0,
+        "selection_min_border_margin": 15.0
+    },
+    "inventory_grid": {
+        "origin_2k": [24, 358],
+        "cell_size_2k": [115, 140],
+        "grid_columns": 4,
+        "grid_rows": 5
     },
     "assembly_board": {
         "region_2k": [880, 260, 1680, 820],

@@ -14,7 +14,10 @@ import mss.tools
 import numpy as np
 
 from src.app import runtime
-from src.features.inventory_import.equipment_classifier import locate_selected_inventory_shape
+from src.features.inventory_import.equipment_classifier import (
+    build_inventory_grid_layout,
+    locate_selected_inventory_shape,
+)
 from src.scanner.assembly_vision import (
     assembly_board_region,
     compute_position_error,
@@ -132,6 +135,35 @@ class GamepadAssemblyController:
     def _inventory_search_cfg(self) -> dict:
         return self.calibration.get("inventory_search", {}) or {}
 
+    def _inventory_grid_cfg(self) -> dict:
+        return self.calibration.get("inventory_grid", {}) or {}
+
+    def _inventory_grid_layout(self, image: np.ndarray) -> dict:
+        image_h, image_w = image.shape[:2]
+        base_width = int(self.calibration.get("base_width", 2560) or 2560)
+        base_height = int(self.calibration.get("base_height", 1440) or 1440)
+        return build_inventory_grid_layout(
+            image_w,
+            image_h,
+            self._inventory_grid_cfg(),
+            base_width=base_width,
+            base_height=base_height,
+        )
+
+    def _wait_after_inventory_move(self) -> None:
+        search_cfg = self._inventory_search_cfg()
+        delay = float(search_cfg.get("post_move_delay_seconds", 0.40) or 0.40)
+        if delay > 0:
+            time.sleep(delay)
+
+    def _format_selected_slot_log(self, recognition: dict) -> str:
+        slot_index = recognition.get("slot_index")
+        slot_row = recognition.get("slot_row")
+        slot_col = recognition.get("slot_col")
+        if slot_index is None or slot_row is None or slot_col is None:
+            return "当前未能定位选中格子"
+        return f"当前选中第 {slot_index} 格 (行{slot_row}, 列{slot_col})"
+
     def _tap_left_stick(self, stick_x: float, stick_y: float) -> None:
         nav = self._inventory_nav_cfg()
         tap_seconds = float(nav.get("tap_seconds", 0.10) or 0.10)
@@ -182,7 +214,10 @@ class GamepadAssemblyController:
         search_cfg = self._inventory_search_cfg()
         min_confidence = float(search_cfg.get("min_confidence", 0.65) or 0.65)
         min_margin = float(search_cfg.get("min_margin", 0.05) or 0.05)
+        min_border_score = float(search_cfg.get("selection_min_border_score", 50.0) or 50.0)
+        min_border_margin = float(search_cfg.get("selection_min_border_margin", 15.0) or 15.0)
         panel_region = self._inventory_panel_region()
+        grid_layout = self._inventory_grid_layout(image)
         recognizer = self._get_shape_recognizer()
         candidate_ids = [shape_id] if shape_id else None
         templates = recognizer.templates
@@ -196,14 +231,19 @@ class GamepadAssemblyController:
             templates,
             image,
             panel_region,
+            grid_layout=grid_layout,
             min_confidence=min_confidence,
             min_margin=0.0 if candidate_ids else min_margin,
+            min_border_score=min_border_score,
+            min_border_margin=min_border_margin,
         )
         if result.get("selection_box"):
             x1, y1, x2, y2 = result["selection_box"]
             logger.debug(
                 f"库存选中框: ({x1}, {y1})-({x2}, {y2}) "
-                f"margin={result.get('margin')} "
+                f"border={result.get('border_score')} "
+                f"border_margin={result.get('border_margin')} "
+                f"shape_margin={result.get('margin')} "
                 f"second={result.get('second_best_confidence')}"
             )
         return result
@@ -243,9 +283,11 @@ class GamepadAssemblyController:
         grid_columns = max(1, int(search_cfg.get("grid_columns", 4) or 4))
 
         self._wake_gamepad()
+        self._wait_after_inventory_move()
         recognition = self._recognize_selected_drive_shape(shape_id)
         logger.info(
-            f"库存形状识别: shape={recognition.get('shape_id')} "
+            f"{self._format_selected_slot_log(recognition)} | "
+            f"shape={recognition.get('shape_id')} "
             f"confidence={recognition.get('confidence')} "
             f"margin={recognition.get('margin')}"
         )
@@ -262,9 +304,11 @@ class GamepadAssemblyController:
                 logger.info(f"  [库存搜索 {step}/{max_steps}] 右移一格")
                 self._tap_inventory_right()
 
+            self._wait_after_inventory_move()
             recognition = self._recognize_selected_drive_shape(shape_id)
             logger.info(
-                f"  识别结果: shape={recognition.get('shape_id')} "
+                f"  {self._format_selected_slot_log(recognition)} | "
+                f"shape={recognition.get('shape_id')} "
                 f"confidence={recognition.get('confidence')} "
                 f"margin={recognition.get('margin')}"
             )

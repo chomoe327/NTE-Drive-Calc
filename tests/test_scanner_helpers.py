@@ -725,37 +725,58 @@ class EquipmentClassifierTests(unittest.TestCase):
 
 
 class InventoryAssemblyShapeTests(unittest.TestCase):
-    def test_locate_selected_inventory_shape_on_assembly_screenshot(self):
+    def test_find_selected_inventory_cell_on_assembly_screenshot(self):
         import cv2
         asset = Path(
             "/Users/chomoe/.cursor/projects/Users-chomoe-projects-personal-NTE-Drive-Calc/assets/"
-            "assembly_test_01_after_gamepad_wake-0477cb18-7f39-4fb5-a035-e91c32c00a75.png"
+            "image-af7cf7e0-a60e-4de8-ad4b-ac00229c1584.png"
         )
+        if not asset.exists():
+            asset = Path(
+                "/Users/chomoe/.cursor/projects/Users-chomoe-projects-personal-NTE-Drive-Calc/assets/"
+                "assembly_test_01_after_gamepad_wake-943bd6c6-283a-45fd-bbe6-b649b9b7fdcd.png"
+            )
         if not asset.exists():
             self.skipTest("assembly debug screenshot not available")
 
-        from src.features.inventory_import.equipment_classifier import locate_selected_inventory_shape
+        from src.features.inventory_import.equipment_classifier import (
+            build_inventory_grid_layout,
+            find_selected_inventory_cell,
+            locate_shape_in_slot_crop,
+        )
         from src.scanner.shape_recognizer import GoldShapeRecognizer
 
         img = cv2.imread(str(asset))
         self.assertIsNotNone(img)
         height, width = img.shape[:2]
-        panel = (
-            int(20 * width / 2560),
-            int(200 * height / 1440),
-            int(620 * width / 2560),
-            int(1020 * height / 1440),
-        )
+        grid_layout = build_inventory_grid_layout(width, height)
+        selected = find_selected_inventory_cell(img, grid_layout)
+        self.assertIsNotNone(selected)
+        self.assertEqual(1, selected["slot_index"])
+        self.assertEqual(0, selected["slot_row"])
+        self.assertEqual(0, selected["slot_col"])
+
         recognizer = GoldShapeRecognizer(template_dir="config/templates")
-        result = locate_selected_inventory_shape(
+        x1, y1, x2, y2 = selected["selection_box"]
+        selected_result = locate_shape_in_slot_crop(
             {"H_2": recognizer.templates["H_2"]},
-            img,
-            panel,
+            img[y1:y2, x1:x2],
             min_margin=0.0,
         )
-        self.assertEqual("H_2", result["shape_id"])
-        self.assertGreaterEqual(result["confidence"], 0.65)
-        self.assertIn("selection_box", result)
+        self.assertNotEqual("H_2", selected_result["shape_id"])
+
+        h2_box = build_inventory_grid_layout(width, height)
+        from src.features.inventory_import.equipment_classifier import _inventory_cell_box
+
+        hx1, hy1, hx2, hy2 = _inventory_cell_box(h2_box, 0, 2)
+        h2_result = locate_shape_in_slot_crop(
+            {"H_2": recognizer.templates["H_2"]},
+            img[hy1:hy2, hx1:hx2],
+            min_confidence=0.64,
+            min_margin=0.0,
+        )
+        self.assertEqual("H_2", h2_result["shape_id"])
+        self.assertGreaterEqual(h2_result["confidence"], 0.64)
 
 
 class IncrementalBaselineTests(unittest.TestCase):

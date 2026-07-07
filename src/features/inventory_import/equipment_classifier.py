@@ -42,7 +42,7 @@ def match_shape_templates_in_crop(
     if scale_hint is None:
         sample = next(iter(templates.values()))
         scale_hint = sample.shape[1], sample.shape[0]
-    base_scale = max(min(crop_w / max(1, scale_hint[0]), crop_h / max(1, scale_hint[1])) * 0.92, 0.12)
+    base_scale = max(min(crop_w / max(1, scale_hint[0]), crop_h / max(1, scale_hint[1])), 0.12)
     scales = sorted({round(base_scale + delta, 2) for delta in (-0.10, -0.06, -0.03, 0.0, 0.03, 0.06, 0.10)})
 
     scores: list[tuple[float, str, tuple[int, int, int, int]]] = []
@@ -100,63 +100,119 @@ def match_shape_templates_in_crop(
     }
 
 
-def _selection_highlight_mask(hsv_img: np.ndarray) -> np.ndarray:
-    mask_pink = cv2.inRange(hsv_img, np.array([140, 80, 120]), np.array([179, 255, 255]))
-    mask_red = cv2.inRange(hsv_img, np.array([0, 80, 120]), np.array([10, 255, 255]))
-    return cv2.bitwise_or(mask_pink, mask_red)
+DEFAULT_INVENTORY_GRID = {
+    "origin_2k": [24, 358],
+    "cell_size_2k": [115, 140],
+    "grid_columns": 4,
+    "grid_rows": 5,
+}
 
 
-def _find_inventory_selection_box(
+def build_inventory_grid_layout(
+    target_width: int,
+    target_height: int,
+    grid_cfg: dict | None = None,
+    *,
+    base_width: int = 2560,
+    base_height: int = 1440,
+) -> dict:
+    """Scale the inventory slot grid from 2K calibration coordinates."""
+    from src.scanner.window_capture import scale_region
+
+    cfg = dict(DEFAULT_INVENTORY_GRID)
+    if grid_cfg:
+        cfg.update(grid_cfg)
+
+    origin_x, origin_y = cfg["origin_2k"]
+    cell_w, cell_h = cfg["cell_size_2k"]
+    columns = max(1, int(cfg.get("grid_columns", 4) or 4))
+    rows = max(1, int(cfg.get("grid_rows", 5) or 5))
+    base_size = (base_width, base_height)
+
+    scaled_origin = scale_region((origin_x, origin_y, origin_x, origin_y), target_width, target_height, base_size)
+    scaled_cell = scale_region((0, 0, cell_w, cell_h), target_width, target_height, base_size)
+    cell_width = max(1, scaled_cell[2] - scaled_cell[0])
+    cell_height = max(1, scaled_cell[3] - scaled_cell[1])
+
+    return {
+        "origin_x": scaled_origin[0],
+        "origin_y": scaled_origin[1],
+        "cell_width": cell_width,
+        "cell_height": cell_height,
+        "grid_columns": columns,
+        "grid_rows": rows,
+    }
+
+
+def _inventory_cell_box(layout: dict, row: int, col: int) -> tuple[int, int, int, int]:
+    x1 = int(layout["origin_x"] + col * layout["cell_width"])
+    y1 = int(layout["origin_y"] + row * layout["cell_height"])
+    x2 = int(x1 + layout["cell_width"])
+    y2 = int(y1 + layout["cell_height"])
+    return x1, y1, x2, y2
+
+
+def _score_inventory_selection_border(cell_crop: np.ndarray) -> float:
+    """Score how strongly a full inventory cell shows the yellow selection frame."""
+    if cell_crop is None or cell_crop.size == 0:
+        return 0.0
+
+    cell_h, cell_w = cell_crop.shape[:2]
+    band = max(2, int(min(cell_h, cell_w) * 0.12))
+    hsv = cv2.cvtColor(cell_crop, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, np.array([10, 100, 150]), np.array([35, 255, 255]))
+    ring = np.zeros((cell_h, cell_w), dtype=bool)
+    ring[:band, :] = True
+    ring[-band:, :] = True
+    ring[:, :band] = True
+    ring[:, -band:] = True
+    ring_pixels = int(ring.sum())
+    if ring_pixels <= 0:
+        return 0.0
+    return float((mask > 0)[ring].sum())
+
+
+def find_selected_inventory_cell(
     img: np.ndarray,
-    panel_region: tuple[int, int, int, int] | None = None,
-) -> tuple[int, int, int, int] | None:
+    grid_layout: dict,
+    *,
+    min_border_score: float = 50.0,
+    min_border_margin: float = 15.0,
+) -> dict | None:
+    """Find the selected inventory slot by yellow border energy on each grid cell."""
     image_h, image_w = img.shape[:2]
-    search = img
-    offset_x = offset_y = 0
-    if panel_region is not None:
-        x1, y1, x2, y2 = panel_region
-        pad_x = max(8, int((x2 - x1) * 0.08))
-        pad_y = max(8, int((y2 - y1) * 0.05))
-        x1 = max(0, x1 - pad_x)
-        y1 = max(0, y1 - pad_y)
-        x2 = min(image_w, x2 + pad_x)
-        y2 = min(image_h, y2 + pad_y)
-        search = img[y1:y2, x1:x2]
-        offset_x, offset_y = x1, y1
-    if search is None or search.size == 0:
+    columns = int(grid_layout["grid_columns"])
+    rows = int(grid_layout["grid_rows"])
+
+    scored_cells: list[tuple[float, int, int, tuple[int, int, int, int]]] = []
+    for row in range(rows):
+        for col in range(columns):
+            x1, y1, x2, y2 = _inventory_cell_box(grid_layout, row, col)
+            if x1 < 0 or y1 < 0 or x2 > image_w or y2 > image_h:
+                continue
+            crop = img[y1:y2, x1:x2]
+            score = _score_inventory_selection_border(crop)
+            scored_cells.append((score, row, col, (x1, y1, x2, y2)))
+
+    if not scored_cells:
         return None
 
-    hsv = cv2.cvtColor(search, cv2.COLOR_BGR2HSV) if len(search.shape) == 3 else cv2.cvtColor(search, cv2.COLOR_GRAY2BGR)
-    mask = _selection_highlight_mask(hsv)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    scored_cells.sort(key=lambda item: item[0], reverse=True)
+    best_score, best_row, best_col, best_box = scored_cells[0]
+    second_score = scored_cells[1][0] if len(scored_cells) > 1 else 0.0
+    border_margin = best_score - second_score
+    if best_score < min_border_score or border_margin < min_border_margin:
+        return None
 
-    search_h, search_w = search.shape[:2]
-    min_area = max(500, int(search_w * search_h * 0.0010))
-    max_area = int(search_w * search_h * 0.12)
-    best_box = None
-    best_area = 0
-
-    for contour in contours:
-        x, y, box_w, box_h = cv2.boundingRect(contour)
-        area = box_w * box_h
-        if area < min_area or area > max_area:
-            continue
-        aspect = box_w / max(box_h, 1)
-        if aspect < 0.65 or aspect > 1.55:
-            continue
-        center_x = offset_x + x + box_w / 2
-        center_y = offset_y + y + box_h / 2
-        if center_x > image_w * 0.30 or center_y < image_h * 0.10 or center_y > image_h * 0.82:
-            continue
-        if area > best_area:
-            best_area = area
-            best_box = (
-                offset_x + x,
-                offset_y + y,
-                offset_x + x + box_w,
-                offset_y + y + box_h,
-            )
-    return best_box
+    slot_index = best_row * columns + best_col + 1
+    return {
+        "slot_index": slot_index,
+        "slot_row": best_row,
+        "slot_col": best_col,
+        "selection_box": best_box,
+        "border_score": round(best_score, 1),
+        "border_margin": round(border_margin, 1),
+    }
 
 
 def locate_shape_in_slot_crop(
@@ -187,15 +243,38 @@ def locate_selected_inventory_shape(
     img: np.ndarray,
     panel_region: tuple[int, int, int, int] | None = None,
     *,
+    grid_layout: dict | None = None,
+    grid_cfg: dict | None = None,
+    base_width: int = 2560,
+    base_height: int = 1440,
     min_confidence: float = INVENTORY_SLOT_MIN_CONFIDENCE,
     min_margin: float = INVENTORY_SLOT_MIN_MARGIN,
+    min_border_score: float = 50.0,
+    min_border_margin: float = 15.0,
 ) -> dict:
     """Detect the highlighted inventory slot and recognize the drive shape inside it."""
-    selection_box = _find_inventory_selection_box(img, panel_region)
-    if selection_box is None:
+    del panel_region  # kept for API compatibility; grid layout defines slot geometry
+
+    image_h, image_w = img.shape[:2]
+    if grid_layout is None:
+        grid_layout = build_inventory_grid_layout(
+            image_w,
+            image_h,
+            grid_cfg,
+            base_width=base_width,
+            base_height=base_height,
+        )
+
+    selected = find_selected_inventory_cell(
+        img,
+        grid_layout,
+        min_border_score=min_border_score,
+        min_border_margin=min_border_margin,
+    )
+    if selected is None:
         return {"shape_id": "Unknown", "confidence": -1.0}
 
-    x1, y1, x2, y2 = selection_box
+    x1, y1, x2, y2 = selected["selection_box"]
     slot_crop = img[y1:y2, x1:x2]
     result = locate_shape_in_slot_crop(
         gold_templates,
@@ -203,7 +282,7 @@ def locate_selected_inventory_shape(
         min_confidence=min_confidence,
         min_margin=min_margin,
     )
-    result["selection_box"] = selection_box
+    result.update(selected)
     return result
 
 
