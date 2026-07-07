@@ -106,8 +106,8 @@ def match_shape_templates_in_crop(
 
 
 DEFAULT_INVENTORY_GRID = {
-    "origin_2k": [24, 358],
-    "cell_size_2k": [115, 140],
+    "origin_2k": [53, 358],
+    "cell_size_2k": [169, 140],
     "grid_columns": 4,
     "grid_rows": 5,
 }
@@ -360,18 +360,28 @@ def _cell_index_from_triangle(
     rows = int(grid_layout["grid_rows"])
 
     if selection_box is not None:
-        x1, y1, x2, y2 = selection_box
-        center_x = (x1 + x2) / 2
-        top_y = y1
+        x1, y1, _, _ = selection_box
     else:
         center_x = float(triangle_match["center_x"])
-        top_y = float(triangle_match["bottom_y"])
+        x1 = center_x - cell_width / 2
+        y1 = float(triangle_match["bottom_y"])
 
-    col = int(round((center_x - origin_x - cell_width / 2) / cell_width))
-    row = int(round((top_y - origin_y) / cell_height))
+    col = int((x1 - origin_x) / cell_width)
+    row = int((y1 - origin_y) / cell_height)
     col = max(0, min(columns - 1, col))
     row = max(0, min(rows - 1, row))
     return row, col
+
+
+def _triangle_aligns_with_grid_row(
+    triangle_match: dict,
+    grid_layout: dict,
+    row: int,
+) -> bool:
+    origin_y = float(grid_layout["origin_y"])
+    cell_height = float(grid_layout["cell_height"])
+    expected_top = origin_y + row * cell_height
+    return abs(float(triangle_match["bottom_y"]) - expected_top) <= cell_height * 0.35
 
 
 def find_selected_inventory_cell(
@@ -407,8 +417,12 @@ def find_selected_inventory_cell(
     if triangle_match is None or not _triangle_match_is_plausible(triangle_match, grid_layout):
         return None
 
-    selection_box = _selection_box_from_triangle(triangle_match, grid_layout, image_w, image_h)
-    row, col = _cell_index_from_triangle(triangle_match, grid_layout, selection_box)
+    provisional_box = _selection_box_from_triangle(triangle_match, grid_layout, image_w, image_h)
+    row, col = _cell_index_from_triangle(triangle_match, grid_layout, provisional_box)
+    if not _triangle_aligns_with_grid_row(triangle_match, grid_layout, row):
+        return None
+
+    selection_box = _inventory_cell_box(grid_layout, row, col)
     columns = int(grid_layout["grid_columns"])
     slot_index = row * columns + col + 1
     return {

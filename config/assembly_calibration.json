@@ -32,8 +32,8 @@
         "selection_min_triangle_confidence": 0.80
     },
     "inventory_grid": {
-        "origin_2k": [24, 358],
-        "cell_size_2k": [115, 140],
+        "origin_2k": [53, 358],
+        "cell_size_2k": [169, 140],
         "grid_columns": 4,
         "grid_rows": 5
     },
@@ -47,8 +47,8 @@
         "max_iterations": 10,
         "max_cell_error": 0.45,
         "min_match_confidence": 0.50,
-        "stick_x_per_col": 0.10,
-        "stick_y_per_row": 0.12,
+        "stick_x_per_col": 0.12,
+        "stick_y_per_row": 0.14,
         "max_stick": 0.45,
         "nudge_seconds": 0.10,
         "correct_after_each_move": false
@@ -63,8 +63,8 @@
         {
             "label": "02_down",
             "stick_x": 0.0,
-            "stick_y": -0.35,
-            "duration_seconds": 0.55
+            "stick_y": -0.30,
+            "duration_seconds": 0.42
         }
     ],
     "grid_nudge": {

@@ -527,7 +527,7 @@ class GamepadAssemblyController:
                 f"  [位置校正 {iteration}/{max_iterations}] "
                 f"检测=({detected_r}, {detected_c}) 目标=({target_r}, {target_c}) "
                 f"误差=(Δr={delta_r:.2f}, Δc={delta_c:.2f}) "
-                f"conf={detection.get('confidence')}"
+                f"conf={detection.get('confidence')} method={detection.get('method')}"
             )
             if not needs_position_correction(delta_r, delta_c, max_cell_error=max_cell_error):
                 logger.success("拖动位置已接近目标格，停止校正。")
