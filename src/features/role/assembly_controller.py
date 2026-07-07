@@ -99,11 +99,8 @@ def _start_assembly_test(self, _role_name: str | None = None):
             config_dir=_resolve_config_dir(),
         )
         logger.info(
-            "装配测试规划结果: role=%s piece=%s start=(%s, %s)",
-            plan.role_name,
-            plan.piece_id,
-            plan.start_r,
-            plan.start_c,
+            f"装配测试规划结果: role={plan.role_name} piece={plan.piece_id} "
+            f"start=({plan.start_r}, {plan.start_c})"
         )
 
         if not is_window_foreground(target_hwnd):
@@ -153,5 +150,5 @@ def _on_assembly_test_error(self, message: str):
         title = "未找到游戏窗口"
     else:
         title = "自动装配测试失败"
-    logger.error("自动装配测试失败: %s", message)
+    logger.error(f"自动装配测试失败: {message}")
     QMessageBox.critical(self, title, str(message))

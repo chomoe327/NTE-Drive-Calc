@@ -52,49 +52,61 @@ def grant_foreground_permission() -> None:
     process_id = _kernel32().GetCurrentProcessId()
     user32.AllowSetForegroundWindow(process_id)
     user32.AllowSetForegroundWindow(ASFW_ANY)
-    logger.info("已请求前台切换权限: process_id=%s", process_id)
+    logger.info(f"已请求前台切换权限: process_id={process_id}")
 
 
-def list_visible_windows() -> list[WindowInfo]:
-    """Enumerate visible top-level windows and log their titles."""
-    _require_windows()
+def _read_window_title(hwnd: int) -> str:
     user32 = _user32()
-    windows: list[WindowInfo] = []
+    length = user32.GetWindowTextLengthW(_hwnd(hwnd))
+    if length <= 0:
+        return ""
+    buffer = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(_hwnd(hwnd), buffer, length + 1)
+    return buffer.value.strip()
+
+
+def _find_game_window_by_enum(exact_title: str) -> WindowInfo | None:
+    user32 = _user32()
+    matches: list[WindowInfo] = []
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
     def callback(hwnd, _lparam):
         if not user32.IsWindowVisible(hwnd):
             return True
-        length = user32.GetWindowTextLengthW(hwnd)
-        if length <= 0:
-            return True
-        buffer = ctypes.create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(hwnd, buffer, length + 1)
-        title = buffer.value.strip()
+        title = _read_window_title(int(hwnd))
         if not title:
             return True
-        windows.append(WindowInfo(hwnd=int(hwnd), title=title))
+        if title == exact_title:
+            matches.append(WindowInfo(hwnd=int(hwnd), title=title))
         return True
 
     user32.EnumWindows(callback, 0)
-    logger.info("====== 可见窗口标题列表（用于确认游戏窗口名称）======")
-    for index, info in enumerate(windows, 1):
-        logger.info(f"[窗口 {index:03d}] hwnd={info.hwnd} title={info.title!r}")
-    logger.info(f"====== 共 {len(windows)} 个可见窗口 ======")
-    return windows
+    if not matches:
+        return None
+    if len(matches) > 1:
+        logger.warning(f"找到多个标题为 {exact_title!r} 的窗口，将使用第一个: hwnd={matches[0].hwnd}")
+    return matches[0]
 
 
 def find_game_window(title: str = "异环") -> WindowInfo | None:
-    """Find the game window by exact title without enumerating all visible windows."""
+    """Find the game window by exact title."""
     _require_windows()
     user32 = _user32()
     exact_title = str(title or "异环").strip() or "异环"
-    hwnd = int(user32.FindWindowW(None, exact_title) or 0)
-    if hwnd and user32.IsWindowVisible(_hwnd(hwnd)):
-        logger.info("已找到游戏窗口: hwnd=%s, title=%r", hwnd, exact_title)
-        return WindowInfo(hwnd=hwnd, title=exact_title)
 
-    logger.warning("未找到标题为 %r 的游戏窗口。", exact_title)
+    hwnd = int(user32.FindWindowW(None, exact_title) or 0)
+    if hwnd:
+        actual_title = _read_window_title(hwnd) or exact_title
+        logger.info(f"FindWindowW 已找到游戏窗口: hwnd={hwnd}, title={actual_title!r}")
+        return WindowInfo(hwnd=hwnd, title=actual_title)
+
+    logger.debug(f"FindWindowW 未命中，改用 EnumWindows 精确匹配: title={exact_title!r}")
+    matched = _find_game_window_by_enum(exact_title)
+    if matched is not None:
+        logger.info(f"EnumWindows 已找到游戏窗口: hwnd={matched.hwnd}, title={matched.title!r}")
+        return matched
+
+    logger.warning(f"未找到标题为 {exact_title!r} 的游戏窗口")
     return None
 
 
@@ -144,7 +156,7 @@ def _switch_to_this_window(hwnd: int) -> None:
         switch.restype = None
         switch(_hwnd(hwnd), True)
     except Exception as exc:
-        logger.debug("SwitchToThisWindow 不可用: %s", exc)
+        logger.debug(f"SwitchToThisWindow 不可用: {exc}")
 
 
 def _activate_window_once(hwnd: int) -> None:
@@ -197,7 +209,7 @@ def activate_window(hwnd: int, retries: int = 3, retry_delay_seconds: float = 0.
 
     attempts = max(1, int(retries))
     for attempt in range(1, attempts + 1):
-        logger.info("尝试激活窗口 (%s/%s): hwnd=%s", attempt, attempts, target)
+        logger.info(f"尝试激活窗口 ({attempt}/{attempts}): hwnd={target}")
         _activate_window_once(target)
         time.sleep(max(0.0, float(retry_delay_seconds)))
 
@@ -207,11 +219,8 @@ def activate_window(hwnd: int, retries: int = 3, retry_delay_seconds: float = 0.
             return True
 
         logger.warning(
-            "窗口激活未确认: target=%s, foreground=%s, attempt=%s/%s",
-            target,
-            active,
-            attempt,
-            attempts,
+            f"窗口激活未确认: target={target}, foreground={active}, "
+            f"attempt={attempt}/{attempts}"
         )
 
     return is_window_foreground(target)
