@@ -26,8 +26,11 @@ from src.scanner.assembly_vision import (
     correction_stick_for_error,
     detect_dragged_piece_anchor,
     estimate_position_error_from_origin,
+    expand_board_region,
     grid_dimensions,
+    is_detection_outlier,
     needs_position_correction,
+    position_error_magnitude,
 )
 from src.scanner.config import ScannerConfig
 from src.scanner.gamepad_controller import ViGEmDriverNotReadyError, _format_vigem_error
@@ -695,7 +698,13 @@ class GamepadAssemblyController:
             )
         return moves
 
-    def _detect_piece_position(self, piece_id: str) -> dict:
+    def _detect_piece_position(
+        self,
+        piece_id: str,
+        *,
+        target_r: int | None = None,
+        target_c: int | None = None,
+    ) -> dict:
         image = self._capture_foreground_bgr()
         image_h, image_w = image.shape[:2]
         board_region = assembly_board_region(
@@ -706,6 +715,18 @@ class GamepadAssemblyController:
         grid_rows, grid_cols = grid_dimensions(self.calibration)
         correction_cfg = self._position_correction_cfg()
         min_confidence = float(correction_cfg.get("min_match_confidence", 0.50) or 0.50)
+        margin_ratio = float(correction_cfg.get("detection_expand_margin_ratio", 0.35) or 0.35)
+        left_margin_ratio = correction_cfg.get("detection_expand_left_margin_ratio")
+        right_margin_ratio = correction_cfg.get("detection_expand_right_margin_ratio")
+        detection_region = expand_board_region(
+            board_region,
+            image_w,
+            image_h,
+            margin_ratio=margin_ratio,
+            left_margin_ratio=float(left_margin_ratio) if left_margin_ratio is not None else None,
+            right_margin_ratio=float(right_margin_ratio) if right_margin_ratio is not None else None,
+        )
+        min_orange_solidity = float(correction_cfg.get("min_orange_solidity", 0.42) or 0.42)
         return detect_dragged_piece_anchor(
             image,
             piece_id,
@@ -714,6 +735,10 @@ class GamepadAssemblyController:
             grid_rows=grid_rows,
             grid_cols=grid_cols,
             min_confidence=min_confidence,
+            target_r=float(target_r) if target_r is not None else None,
+            target_c=float(target_c) if target_c is not None else None,
+            detection_region=detection_region,
+            min_orange_solidity=min_orange_solidity,
         )
 
     def _correction_settle_seconds(self) -> float:
@@ -730,13 +755,46 @@ class GamepadAssemblyController:
         settle_seconds = self._correction_settle_seconds()
         origin_r = int(self.calibration.get("grid_origin_r", 0) or 0)
         origin_c = int(self.calibration.get("grid_origin_c", 0) or 0)
+        outlier_max_cell_jump = float(correction_cfg.get("outlier_max_cell_jump", 1.20) or 1.20)
+        stop_on_worse_streak = max(1, int(correction_cfg.get("stop_on_worse_streak", 2) or 2))
         corrections: list[StickMove] = []
         used_origin_fallback = False
+        last_accepted: tuple[float, float] | None = None
+        best_error = float("inf")
+        worse_streak = 0
 
         for iteration in range(1, max_iterations + 1):
-            detection = self._detect_piece_position(piece_id)
+            detection = self._detect_piece_position(
+                piece_id,
+                target_r=target_r,
+                target_c=target_c,
+            )
             detected_r = detection.get("anchor_r")
             detected_c = detection.get("anchor_c")
+            if (
+                detected_r is not None
+                and detected_c is not None
+                and last_accepted is not None
+                and is_detection_outlier(
+                    float(detected_r),
+                    float(detected_c),
+                    last_accepted[0],
+                    last_accepted[1],
+                    max_cell_jump=outlier_max_cell_jump,
+                )
+            ):
+                worse_streak += 1
+                logger.warning(
+                    f"  [位置校正 {iteration}/{max_iterations}] "
+                    f"检测跳变过大，忽略本次结果 "
+                    f"({detected_r}, {detected_c}) vs 上次 {last_accepted} "
+                    f"(streak={worse_streak}/{stop_on_worse_streak})"
+                )
+                if worse_streak >= stop_on_worse_streak:
+                    logger.warning("检测持续跳变，停止位置校正。")
+                    break
+                continue
+
             error = compute_position_error(detected_r, detected_c, target_r, target_c)
             if error is None:
                 if used_origin_fallback:
@@ -760,6 +818,21 @@ class GamepadAssemblyController:
                 )
             else:
                 delta_r, delta_c = error
+                current_error = position_error_magnitude(delta_r, delta_c)
+                if iteration > 1 and current_error > best_error + max_cell_error:
+                    worse_streak += 1
+                    logger.warning(
+                        f"  [位置校正 {iteration}/{max_iterations}] "
+                        f"误差变大 ({current_error:.2f} > {best_error:.2f})，"
+                        f"停止继续校正 (streak={worse_streak}/{stop_on_worse_streak})"
+                    )
+                    if worse_streak >= stop_on_worse_streak:
+                        break
+                    continue
+
+                worse_streak = 0
+                best_error = min(best_error, current_error)
+                last_accepted = (float(detected_r), float(detected_c))
                 logger.info(
                     f"  [位置校正 {iteration}/{max_iterations}] "
                     f"检测=({detected_r}, {detected_c}) 目标=({target_r}, {target_c}) "
@@ -773,6 +846,9 @@ class GamepadAssemblyController:
                 break
 
             stick_x, stick_y, duration = correction_stick_for_error(delta_r, delta_c, correction_cfg)
+            if abs(stick_x) < 0.01 and abs(stick_y) < 0.01:
+                logger.info("  当前轴误差已在容差内，停止校正。")
+                break
             move = StickMove(
                 stick_x=stick_x,
                 stick_y=stick_y,

@@ -44,15 +44,22 @@
     },
     "position_correction": {
         "enabled": true,
-        "max_iterations": 10,
+        "max_iterations": 8,
         "max_cell_error": 0.45,
         "min_match_confidence": 0.50,
         "stick_x_per_col": 0.12,
         "stick_y_per_row": 0.14,
-        "max_stick": 0.45,
+        "max_stick": 0.35,
+        "correction_stick_scale": 0.85,
         "nudge_seconds": 0.10,
         "post_drag_settle_seconds": 0.35,
-        "correct_after_each_move": false
+        "correct_after_each_move": false,
+        "detection_expand_margin_ratio": 0.35,
+        "detection_expand_left_margin_ratio": 0.55,
+        "detection_expand_right_margin_ratio": 0.12,
+        "outlier_max_cell_jump": 1.20,
+        "stop_on_worse_streak": 2,
+        "min_orange_solidity": 0.42
     },
     "drag_moves": [
         {
