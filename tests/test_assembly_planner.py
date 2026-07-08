@@ -138,6 +138,48 @@ class AssemblyPlannerTests(unittest.TestCase):
         self.assertEqual("H_2", plan.pieces[0].piece_id)
         self.assertEqual("V_2", plan.pieces[1].piece_id)
 
+    def test_find_piece_anchor_does_not_index_out_of_range_near_edge(self):
+        blueprint = [
+            ["XX", "XX", "XX", "XX", "XX"],
+            ["H_4", "H_4", "H_4", "H_4", "0"],
+            ["0", "0", "0", "0", "0"],
+            ["0", "0", "0", "0", "0"],
+            ["0", "0", "0", "0", "0"],
+        ]
+        orchestrator = NTEPipelineOrchestrator(config_dir="config")
+        pieces = iter_blueprint_piece_placements(blueprint, orchestrator.shapes_db)
+        self.assertEqual(1, len(pieces))
+        self.assertEqual((1, 0), (pieces[0].start_r, pieces[0].start_c))
+
+    def test_iter_blueprint_supports_jagged_rows(self):
+        blueprint = [
+            ["XX", "XX"],
+            ["H_2", "H_2", "0"],
+        ]
+        orchestrator = NTEPipelineOrchestrator(config_dir="config")
+        pieces = iter_blueprint_piece_placements(
+            blueprint,
+            orchestrator.shapes_db,
+            expected_rows=5,
+            expected_cols=5,
+        )
+        self.assertEqual(1, len(pieces))
+        self.assertEqual("H_2", pieces[0].piece_id)
+
+    def test_resolve_numeric_blueprint_cell_from_equipped_drives(self):
+        blueprint = [[1, -1]]
+        equipped_drives = [{"uid": "d1", "shape_id": "H_2"}]
+        orchestrator = NTEPipelineOrchestrator(config_dir="config")
+        pieces = iter_blueprint_piece_placements(
+            blueprint,
+            orchestrator.shapes_db,
+            equipped_drives=equipped_drives,
+            expected_rows=5,
+            expected_cols=5,
+        )
+        self.assertEqual(1, len(pieces))
+        self.assertEqual("H_2", pieces[0].piece_id)
+
 
 if __name__ == "__main__":
     unittest.main()

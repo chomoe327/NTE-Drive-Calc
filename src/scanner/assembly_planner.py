@@ -75,25 +75,99 @@ def _piece_anchor(piece_matrix: List[List[int]]) -> tuple[int, int]:
 
 def find_piece_anchor(board: List[List[int]], piece_id: str, piece_matrix: List[List[int]]) -> tuple[int, int]:
     rows = len(board)
-    cols = len(board[0]) if board else 0
+    cols = max((len(row) for row in board), default=0)
     piece_rows = len(piece_matrix)
-    piece_cols = len(piece_matrix[0]) if piece_matrix else 0
+    piece_cols = max((len(row) for row in piece_matrix), default=0)
 
     for start_r in range(rows):
         for start_c in range(cols):
             matched = True
             for pr in range(piece_rows):
-                for pc in range(piece_cols):
-                    if piece_matrix[pr][pc] != 1:
-                        continue
-                    if board[start_r + pr][start_c + pc] != piece_id:
-                        matched = False
-                        break
                 if not matched:
                     break
+                piece_row = piece_matrix[pr] if pr < len(piece_matrix) else []
+                for pc in range(piece_cols):
+                    if pc >= len(piece_row) or piece_row[pc] != 1:
+                        continue
+                    target_r = start_r + pr
+                    target_c = start_c + pc
+                    if target_r >= rows or target_c >= len(board[target_r]):
+                        matched = False
+                        break
+                    if board[target_r][target_c] != piece_id:
+                        matched = False
+                        break
             if matched:
                 return start_r, start_c
     raise ValueError(f"在求解结果中未找到 {piece_id} 的放置位置。")
+
+
+def normalize_blueprint_layout(
+    blueprint_layout: list[list[Any]],
+    *,
+    expected_rows: int | None = None,
+    expected_cols: int | None = None,
+) -> list[list[Any]]:
+    """Pad blueprint rows to a rectangular grid so downstream indexing is safe."""
+    rows = [list(row or []) for row in (blueprint_layout or [])]
+    if expected_rows is not None:
+        while len(rows) < expected_rows:
+            rows.append([])
+        rows = rows[:expected_rows]
+    if not rows:
+        return rows
+
+    width = max(len(row) for row in rows)
+    if expected_cols is not None:
+        width = max(width, expected_cols)
+
+    normalized: list[list[Any]] = []
+    for row in rows:
+        padded = list(row) + [0] * max(0, width - len(row))
+        if expected_cols is not None:
+            padded = padded[:expected_cols]
+            if len(padded) < expected_cols:
+                padded.extend([0] * (expected_cols - len(padded)))
+        normalized.append(padded)
+    return normalized
+
+
+def _is_empty_blueprint_cell(cell: Any) -> bool:
+    return cell in ("XX", -1, "0", 0, None, "")
+
+
+def resolve_blueprint_cell(
+    cell: Any,
+    *,
+    equipped_drives: list[dict[str, Any]] | None = None,
+    shapes_db: dict[str, Any] | None = None,
+) -> str | None:
+    """Resolve a blueprint cell to a shape_id, including legacy numeric encodings."""
+    if _is_empty_blueprint_cell(cell):
+        return None
+
+    text = str(cell).strip()
+    if shapes_db and text in shapes_db:
+        return text
+
+    drive_candidates: list[int] = []
+    if isinstance(cell, int) and not isinstance(cell, bool):
+        drive_candidates.extend([cell, cell - 1])
+    elif text.isdigit():
+        numeric = int(text)
+        drive_candidates.extend([numeric, numeric - 1])
+
+    for index in drive_candidates:
+        if index < 0 or not equipped_drives or index >= len(equipped_drives):
+            continue
+        drive = equipped_drives[index]
+        if not isinstance(drive, dict):
+            continue
+        shape_id = str(drive.get("shape_id") or "").strip()
+        if shape_id and (not shapes_db or shape_id in shapes_db):
+            return shape_id
+
+    return text or None
 
 
 def load_equipped_state(state_path: Path | None = None) -> dict[str, Any]:
@@ -107,7 +181,12 @@ def load_equipped_state(state_path: Path | None = None) -> dict[str, Any]:
     return data
 
 
-def blueprint_layout_to_board(blueprint_layout: list[list[Any]]) -> list[list[Any]]:
+def blueprint_layout_to_board(
+    blueprint_layout: list[list[Any]],
+    *,
+    equipped_drives: list[dict[str, Any]] | None = None,
+    shapes_db: dict[str, Any] | None = None,
+) -> list[list[Any]]:
     board: list[list[Any]] = []
     for row in blueprint_layout or []:
         converted: list[Any] = []
@@ -117,7 +196,12 @@ def blueprint_layout_to_board(blueprint_layout: list[list[Any]]) -> list[list[An
             elif cell in ("0", 0):
                 converted.append(0)
             else:
-                converted.append(str(cell))
+                shape_id = resolve_blueprint_cell(
+                    cell,
+                    equipped_drives=equipped_drives,
+                    shapes_db=shapes_db,
+                )
+                converted.append(shape_id or str(cell))
         board.append(converted)
     return board
 
@@ -126,40 +210,68 @@ def find_shape_anchor_in_blueprint(
     blueprint_layout: list[list[Any]],
     piece_id: str,
     piece_matrix: List[List[int]],
+    *,
+    equipped_drives: list[dict[str, Any]] | None = None,
+    shapes_db: dict[str, Any] | None = None,
+    expected_rows: int | None = None,
+    expected_cols: int | None = None,
 ) -> tuple[int, int]:
-    board = blueprint_layout_to_board(blueprint_layout)
+    normalized = normalize_blueprint_layout(
+        blueprint_layout,
+        expected_rows=expected_rows,
+        expected_cols=expected_cols,
+    )
+    board = blueprint_layout_to_board(
+        normalized,
+        equipped_drives=equipped_drives,
+        shapes_db=shapes_db,
+    )
     if not board:
         raise ValueError("配装图纸为空，无法定位驱动块位置。")
     return find_piece_anchor(board, piece_id, piece_matrix)
 
 
-def _is_empty_blueprint_cell(cell: Any) -> bool:
-    return cell in ("XX", -1, "0", 0, None, "")
-
-
 def iter_blueprint_piece_placements(
     blueprint_layout: list[list[Any]],
     shapes_db: dict[str, Any],
+    *,
+    equipped_drives: list[dict[str, Any]] | None = None,
+    expected_rows: int | None = None,
+    expected_cols: int | None = None,
 ) -> list[AssemblyPiecePlan]:
     """Enumerate every drive piece instance on a saved blueprint layout."""
-    board = blueprint_layout_to_board(blueprint_layout)
+    normalized = normalize_blueprint_layout(
+        blueprint_layout,
+        expected_rows=expected_rows,
+        expected_cols=expected_cols,
+    )
+    board = blueprint_layout_to_board(
+        normalized,
+        equipped_drives=equipped_drives,
+        shapes_db=shapes_db,
+    )
     if not board:
         raise ValueError("配装图纸为空，无法解析驱动块位置。")
 
     rows = len(board)
-    cols = len(board[0]) if board else 0
+    cols = max((len(row) for row in board), default=0)
     visited = [[False] * cols for _ in range(rows)]
     placements: list[AssemblyPiecePlan] = []
 
     for row_index in range(rows):
         for col_index in range(cols):
+            if col_index >= len(board[row_index]):
+                continue
             cell = board[row_index][col_index]
             if _is_empty_blueprint_cell(cell) or visited[row_index][col_index]:
                 continue
 
             piece_id = str(cell)
             if piece_id not in shapes_db:
-                raise ValueError(f"图纸中的形状 {piece_id!r} 不存在于 shapes.json。")
+                raise ValueError(
+                    f"图纸中的形状 {piece_id!r} 不存在于 shapes.json；"
+                    f"请确认 {ASSEMBLY_BLUEPRINT_ROLE} 的 blueprint_layout 已保存为形状 ID。"
+                )
 
             component_cells: list[tuple[int, int]] = []
             stack = [(row_index, col_index)]
@@ -171,6 +283,8 @@ def iter_blueprint_piece_placements(
                     next_r = current_r + delta_r
                     next_c = current_c + delta_c
                     if not (0 <= next_r < rows and 0 <= next_c < cols):
+                        continue
+                    if next_c >= len(board[next_r]):
                         continue
                     if visited[next_r][next_c]:
                         continue
@@ -243,8 +357,19 @@ def plan_assembly(
     if piece_id not in orchestrator.shapes_db:
         raise ValueError(f"形状 {piece_id!r} 不存在于 shapes.json。")
     piece_matrix = orchestrator.shapes_db[piece_id].matrix
+    role_board = orchestrator.roles_db.get(role_name, {}).get("board_matrix") or []
+    expected_rows = len(role_board)
+    expected_cols = len(role_board[0]) if role_board else None
 
-    start_r, start_c = find_shape_anchor_in_blueprint(blueprint_layout, piece_id, piece_matrix)
+    start_r, start_c = find_shape_anchor_in_blueprint(
+        blueprint_layout,
+        piece_id,
+        piece_matrix,
+        equipped_drives=role_state.get("equipped_drives") or [],
+        shapes_db=orchestrator.shapes_db,
+        expected_rows=expected_rows,
+        expected_cols=expected_cols,
+    )
     inventory_items = inventory if inventory is not None else load_real_inventory()
     inventory_drive = find_first_inventory_drive(inventory_items, piece_id)
     equipped_drive = find_equipped_drive(role_state, piece_id)
@@ -279,7 +404,17 @@ def plan_full_assembly(
         raise ValueError(f"角色 {role_name!r} 的配装图纸为空，请先在配装页保存统筹结果。")
 
     orchestrator = NTEPipelineOrchestrator(config_dir=config_dir)
-    pieces = iter_blueprint_piece_placements(blueprint_layout, orchestrator.shapes_db)
+    role_board = orchestrator.roles_db.get(role_name, {}).get("board_matrix") or []
+    expected_rows = len(role_board)
+    expected_cols = len(role_board[0]) if role_board else None
+    equipped_drives = role_state.get("equipped_drives") or []
+    pieces = iter_blueprint_piece_placements(
+        blueprint_layout,
+        orchestrator.shapes_db,
+        equipped_drives=equipped_drives,
+        expected_rows=expected_rows,
+        expected_cols=expected_cols,
+    )
     if not pieces:
         raise ValueError(f"角色 {role_name!r} 的配装图纸中没有可装配的驱动块。")
 
