@@ -332,8 +332,40 @@ class GamepadAssemblyController:
     def _get_shape_recognizer(self) -> GoldShapeRecognizer:
         if self._shape_recognizer is None:
             template_dir = str(runtime.TEMPLATE_DIR or runtime.CONFIG_DIR / "templates")
-            self._shape_recognizer = GoldShapeRecognizer(template_dir=template_dir)
+            search_cfg = self._inventory_search_cfg()
+            template_suffix = str(search_cfg.get("template_suffix", "_Inv.png") or "_Inv.png")
+            purple_suffix = str(
+                search_cfg.get("purple_template_suffix", "_Inv_Purple.png") or "_Inv_Purple.png"
+            )
+            quality_suffixes = {"Purple": purple_suffix} if purple_suffix else {}
+            self._shape_recognizer = GoldShapeRecognizer(
+                template_dir=template_dir,
+                template_suffix=template_suffix,
+                quality_template_suffixes=quality_suffixes,
+            )
         return self._shape_recognizer
+
+    def _inventory_match_qualities(self, quality: str | None = None) -> list[str]:
+        if quality:
+            return [quality]
+        search_cfg = self._inventory_search_cfg()
+        configured = search_cfg.get("match_qualities")
+        if isinstance(configured, list) and configured:
+            return [str(item) for item in configured if str(item).strip()]
+        return ["Gold", "Purple"]
+
+    def _inventory_templates_for_quality(self, quality: str | None = None) -> dict:
+        search_cfg = self._inventory_search_cfg()
+        default_quality = str(search_cfg.get("default_quality", "Gold") or "Gold")
+        resolved_quality = quality or default_quality
+        return self._get_shape_recognizer().templates_for_quality(resolved_quality)
+
+    def _inventory_template_variants_for_shape_match(
+        self,
+        quality: str | None = None,
+    ) -> dict[str, list[np.ndarray]]:
+        qualities = self._inventory_match_qualities(quality)
+        return self._get_shape_recognizer().templates_for_shape_match(qualities)
 
     def _capture_foreground_bgr(self) -> np.ndarray:
         with mss.MSS() as sct:
@@ -351,7 +383,12 @@ class GamepadAssemblyController:
         _, regions = profiles[0]
         return regions["inventory_panel"]
 
-    def _recognize_selected_drive_shape(self, shape_id: str | None = None) -> dict:
+    def _recognize_selected_drive_shape(
+        self,
+        shape_id: str | None = None,
+        *,
+        quality: str | None = None,
+    ) -> dict:
         image = self._capture_foreground_bgr()
         search_cfg = self._inventory_search_cfg()
         min_margin = float(search_cfg.get("min_margin", 0.05) or 0.05)
@@ -366,9 +403,8 @@ class GamepadAssemblyController:
         grid_layout = self._inventory_grid_layout(image)
         content_rect = self._inventory_content_rect(image)
         triangle_template = self._get_selection_triangle_template()
-        recognizer = self._get_shape_recognizer()
+        templates = self._inventory_template_variants_for_shape_match(quality)
         candidate_ids = [shape_id] if shape_id else None
-        templates = recognizer.templates
         if candidate_ids is not None:
             templates = {
                 sid: templates[sid]
@@ -436,7 +472,12 @@ class GamepadAssemblyController:
         time.sleep(settle_seconds)
         self._capture_debug("after_gamepad_wake")
 
-    def select_inventory_drive_by_shape(self, shape_id: str) -> dict:
+    def select_inventory_drive_by_shape(
+        self,
+        shape_id: str,
+        *,
+        quality: str | None = None,
+    ) -> dict:
         """Search the inventory by recognizing the currently selected drive shape."""
         search_cfg = self._inventory_search_cfg()
         max_steps = max(1, int(search_cfg.get("max_steps", 20) or 20))
@@ -444,7 +485,7 @@ class GamepadAssemblyController:
 
         self._wake_gamepad()
         self._wait_after_inventory_move()
-        recognition = self._recognize_selected_drive_shape(shape_id)
+        recognition = self._recognize_selected_drive_shape(shape_id, quality=quality)
         logger.info(
             f"{self._format_selected_slot_log(recognition)} | "
             f"triangle_conf={recognition.get('triangle_confidence')} "
@@ -466,7 +507,7 @@ class GamepadAssemblyController:
                 self._tap_inventory_right()
 
             self._wait_after_inventory_move()
-            recognition = self._recognize_selected_drive_shape(shape_id)
+            recognition = self._recognize_selected_drive_shape(shape_id, quality=quality)
             logger.info(
                 f"  {self._format_selected_slot_log(recognition)} | "
                 f"triangle_conf={recognition.get('triangle_confidence')} "
@@ -558,8 +599,15 @@ class GamepadAssemblyController:
         time.sleep(settle_seconds)
         self._handle_post_place_dialogs()
 
-    def assemble_piece(self, start_r: int, start_c: int, piece_id: str) -> list[StickMove]:
-        return self.drag_to_grid_cell(start_r, start_c, piece_id=piece_id)
+    def assemble_piece(
+        self,
+        start_r: int,
+        start_c: int,
+        piece_id: str,
+        *,
+        quality: str | None = None,
+    ) -> list[StickMove]:
+        return self.drag_to_grid_cell(start_r, start_c, piece_id=piece_id, quality=quality)
 
     def assemble_all_pieces(
         self,
@@ -702,6 +750,7 @@ class GamepadAssemblyController:
         self,
         piece_id: str,
         *,
+        quality: str | None = None,
         target_r: int | None = None,
         target_c: int | None = None,
     ) -> dict:
@@ -730,7 +779,7 @@ class GamepadAssemblyController:
         return detect_dragged_piece_anchor(
             image,
             piece_id,
-            self._get_shape_recognizer().templates,
+            self._inventory_template_variants_for_shape_match(quality),
             board_region,
             grid_rows=grid_rows,
             grid_cols=grid_cols,
@@ -745,7 +794,14 @@ class GamepadAssemblyController:
         correction_cfg = self._position_correction_cfg()
         return float(correction_cfg.get("post_drag_settle_seconds", 0.35) or 0.35)
 
-    def _correct_drag_position(self, piece_id: str, target_r: int, target_c: int) -> list[StickMove]:
+    def _correct_drag_position(
+        self,
+        piece_id: str,
+        target_r: int,
+        target_c: int,
+        *,
+        quality: str | None = None,
+    ) -> list[StickMove]:
         correction_cfg = self._position_correction_cfg()
         if not correction_cfg.get("enabled", True):
             return []
@@ -766,6 +822,7 @@ class GamepadAssemblyController:
         for iteration in range(1, max_iterations + 1):
             detection = self._detect_piece_position(
                 piece_id,
+                quality=quality,
                 target_r=target_r,
                 target_c=target_c,
             )
@@ -867,13 +924,20 @@ class GamepadAssemblyController:
 
         return corrections
 
-    def drag_to_grid_cell(self, start_r: int, start_c: int, piece_id: str = "H_2") -> list[StickMove]:
+    def drag_to_grid_cell(
+        self,
+        start_r: int,
+        start_c: int,
+        piece_id: str = "H_2",
+        *,
+        quality: str | None = None,
+    ) -> list[StickMove]:
         moves = self._moves_from_config_list(start_r, start_c)
         logger.info(
             f"开始拖动到网格 ({start_r}, {start_c})，共 {len(moves)} 段初始摇杆动作。"
         )
 
-        self.select_inventory_drive_by_shape(piece_id)
+        self.select_inventory_drive_by_shape(piece_id, quality=quality)
         self._begin_drag_hold()
         applied_moves: list[StickMove] = []
         try:
@@ -888,12 +952,18 @@ class GamepadAssemblyController:
 
                 correction_cfg = self._position_correction_cfg()
                 if correction_cfg.get("correct_after_each_move", False):
-                    applied_moves.extend(self._correct_drag_position(piece_id, start_r, start_c))
+                    applied_moves.extend(
+                        self._correct_drag_position(
+                            piece_id, start_r, start_c, quality=quality
+                        )
+                    )
 
             settle_seconds = self._correction_settle_seconds()
             if settle_seconds > 0:
                 time.sleep(settle_seconds)
-            applied_moves.extend(self._correct_drag_position(piece_id, start_r, start_c))
+            applied_moves.extend(
+                self._correct_drag_position(piece_id, start_r, start_c, quality=quality)
+            )
         finally:
             if self._drag_active:
                 self._finish_drag_hold()

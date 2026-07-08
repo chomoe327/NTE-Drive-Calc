@@ -12,11 +12,25 @@ from src.utils.image_io import imread_unicode
 
 
 class GoldShapeRecognizer:
-    """Load *_Gold.png templates mapped to base shape_id names."""
+    """Load inventory/shape templates named {shape_id}{suffix}, mapped to base shape_id.
 
-    def __init__(self, template_dir: str = "config/templates"):
+    Default templates (``self.templates``) use ``template_suffix`` — typically gold
+    inventory icons ``{shape_id}_Inv.png``. Additional qualities load from
+    ``quality_template_suffixes``, e.g. ``{"Purple": "_Inv_Purple.png"}``.
+    """
+
+    def __init__(
+        self,
+        template_dir: str = "config/templates",
+        *,
+        template_suffix: str = "_Gold.png",
+        quality_template_suffixes: dict[str, str] | None = None,
+    ):
         self.template_dir = template_dir
+        self.template_suffix = template_suffix
+        self.quality_template_suffixes = dict(quality_template_suffixes or {})
         self.templates: dict[str, np.ndarray] = {}
+        self.templates_by_quality: dict[str, dict[str, np.ndarray]] = {}
         self.valid_shape_ids = self._load_valid_shape_ids()
         self._load_templates()
 
@@ -36,21 +50,62 @@ class GoldShapeRecognizer:
             logger.warning(f"读取形状定义失败，将按文件名过滤 Gold 模板: {exc}")
             return set()
 
+    def _load_templates_for_suffix(self, suffix: str) -> dict[str, np.ndarray]:
+        loaded: dict[str, np.ndarray] = {}
+        for shape_id in sorted(self.valid_shape_ids):
+            filepath = os.path.join(self.template_dir, f"{shape_id}{suffix}")
+            if not os.path.exists(filepath):
+                continue
+            template_img = imread_unicode(filepath, cv2.IMREAD_GRAYSCALE)
+            if template_img is not None:
+                loaded[shape_id] = template_img
+        return loaded
+
     def _load_templates(self) -> None:
         if not os.path.exists(self.template_dir):
             os.makedirs(self.template_dir)
             logger.warning(f"模板文件夹 {self.template_dir} 不存在，已自动创建。")
             return
 
-        for shape_id in sorted(self.valid_shape_ids):
-            filepath = os.path.join(self.template_dir, f"{shape_id}_Gold.png")
-            if not os.path.exists(filepath):
-                continue
-            template_img = imread_unicode(filepath, cv2.IMREAD_GRAYSCALE)
-            if template_img is not None:
-                self.templates[shape_id] = template_img
+        self.templates = self._load_templates_for_suffix(self.template_suffix)
+        self.templates_by_quality = {}
+        for quality, suffix in sorted(self.quality_template_suffixes.items()):
+            quality_templates = self._load_templates_for_suffix(suffix)
+            if quality_templates:
+                self.templates_by_quality[quality] = quality_templates
 
-        logger.info(f"Gold 形状识别器就绪，已加载 {len(self.templates)} 个模板。")
+        quality_counts = ", ".join(
+            f"{quality}={len(templates)}"
+            for quality, templates in sorted(self.templates_by_quality.items())
+        )
+        extra = f"；品质模板 {quality_counts}" if quality_counts else ""
+        logger.info(
+            f"库存形状识别器就绪，已加载 {len(self.templates)} 个默认模板"
+            f"（后缀 {self.template_suffix}）{extra}。"
+        )
+
+    def templates_for_quality(self, quality: str | None = None) -> dict[str, np.ndarray]:
+        """Return templates for the requested quality, falling back to default gold."""
+        if quality and quality in self.templates_by_quality:
+            return self.templates_by_quality[quality]
+        return self.templates
+
+    def templates_for_shape_match(
+        self,
+        qualities: list[str] | None = None,
+    ) -> dict[str, list[np.ndarray]]:
+        """Return all inventory template variants grouped by base shape_id."""
+        resolved = qualities or ["Gold", *self.templates_by_quality.keys()]
+        variants: dict[str, list[np.ndarray]] = {}
+        for quality in resolved:
+            bucket = (
+                self.templates
+                if quality == "Gold"
+                else self.templates_by_quality.get(quality, {})
+            )
+            for shape_id, template in bucket.items():
+                variants.setdefault(shape_id, []).append(template)
+        return variants
 
 
 class ShapeRecognizer:
@@ -93,7 +148,11 @@ class ShapeRecognizer:
                 if self.valid_shape_ids:
                     if shape_id not in self.valid_shape_ids:
                         continue
-                elif shape_id.endswith(("_Gold", "_Purple", "_Blue")) or shape_id == "new_tag":
+                elif (
+                    shape_id.endswith(("_Gold", "_Purple", "_Blue", "_Inv"))
+                    or "_Inv_" in shape_id
+                    or shape_id == "new_tag"
+                ):
                     continue
                 filepath = os.path.join(self.template_dir, filename)
 

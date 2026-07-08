@@ -27,6 +27,10 @@
         "target_shape_min_confidence": 0.55,
         "min_margin": 0.05,
         "post_move_delay_seconds": 0.40,
+        "template_suffix": "_Inv.png",
+        "purple_template_suffix": "_Inv_Purple.png",
+        "match_qualities": ["Gold", "Purple"],
+        "default_quality": "Gold",
         "selection_triangle_template": "inventory_selection_triangle.png",
         "selection_triangle_size_2k": [70, 20],
         "selection_min_triangle_confidence": 0.80

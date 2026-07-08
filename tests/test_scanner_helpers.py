@@ -724,6 +724,74 @@ class EquipmentClassifierTests(unittest.TestCase):
         self.assertEqual(1, processor.ocr_engine.calls)
 
 
+class InventoryShapeRecognizerTests(unittest.TestCase):
+    def test_gold_shape_recognizer_loads_gold_and_purple_inventory_templates(self):
+        from src.scanner.shape_recognizer import GoldShapeRecognizer
+
+        recognizer = GoldShapeRecognizer(
+            template_dir="config/templates",
+            template_suffix="_Inv.png",
+            quality_template_suffixes={"Purple": "_Inv_Purple.png"},
+        )
+
+        self.assertIn("H_2", recognizer.templates)
+        self.assertIn("H_2", recognizer.templates_by_quality["Purple"])
+        self.assertIsNotNone(recognizer.templates_for_quality("Gold").get("H_2"))
+        self.assertIsNotNone(recognizer.templates_for_quality("Purple").get("H_2"))
+        self.assertIs(
+            recognizer.templates_for_quality("Purple")["H_2"],
+            recognizer.templates_by_quality["Purple"]["H_2"],
+        )
+        self.assertIs(
+            recognizer.templates_for_quality(None)["H_2"],
+            recognizer.templates["H_2"],
+        )
+
+    def test_gold_shape_recognizer_combines_quality_variants_for_shape_match(self):
+        from src.scanner.shape_recognizer import GoldShapeRecognizer
+
+        recognizer = GoldShapeRecognizer(
+            template_dir="config/templates",
+            template_suffix="_Inv.png",
+            quality_template_suffixes={"Purple": "_Inv_Purple.png"},
+        )
+        variants = recognizer.templates_for_shape_match(["Gold", "Purple"])
+
+        self.assertIn("H_2", variants)
+        self.assertEqual(2, len(variants["H_2"]))
+        self.assertIs(variants["H_2"][0], recognizer.templates["H_2"])
+        self.assertIs(
+            variants["H_2"][1],
+            recognizer.templates_by_quality["Purple"]["H_2"],
+        )
+
+    def test_match_shape_template_variants_in_crop_picks_best_quality_variant(self):
+        import cv2
+        import numpy as np
+
+        from src.features.inventory_import.equipment_classifier import (
+            match_shape_template_variants_in_crop,
+        )
+        from src.scanner.shape_recognizer import GoldShapeRecognizer
+
+        recognizer = GoldShapeRecognizer(
+            template_dir="config/templates",
+            template_suffix="_Inv.png",
+            quality_template_suffixes={"Purple": "_Inv_Purple.png"},
+        )
+        template = recognizer.templates["H_2"]
+        crop = cv2.cvtColor(template, cv2.COLOR_GRAY2BGR)
+        result = match_shape_template_variants_in_crop(
+            crop,
+            recognizer.templates_for_shape_match(["Gold", "Purple"]),
+            min_confidence=0.55,
+            min_margin=0.0,
+        )
+
+        self.assertEqual("H_2", result["shape_id"])
+        self.assertGreaterEqual(result["confidence"], 0.55)
+
+
 class InventoryAssemblyShapeTests(unittest.TestCase):
     def test_find_selected_inventory_cell_on_assembly_screenshot(self):
         import cv2
@@ -772,7 +840,10 @@ class InventoryAssemblyShapeTests(unittest.TestCase):
         self.assertEqual(0, selected["slot_col"])
         self.assertGreaterEqual(selected.get("triangle_confidence", 0.0), 0.80)
 
-        recognizer = GoldShapeRecognizer(template_dir="config/templates")
+        recognizer = GoldShapeRecognizer(
+            template_dir="config/templates",
+            template_suffix="_Inv.png",
+        )
         x1, y1, x2, y2 = selected["selection_box"]
         selected_result = locate_shape_in_slot_crop(
             {"H_2": recognizer.templates["H_2"]},

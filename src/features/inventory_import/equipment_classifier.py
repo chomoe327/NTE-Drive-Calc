@@ -105,6 +105,138 @@ def match_shape_templates_in_crop(
     }
 
 
+def _match_scales_for_crop(
+    crop_h: int,
+    crop_w: int,
+    *,
+    scale_hint: tuple[int, int] | None = None,
+    sample_template: np.ndarray | None = None,
+) -> list[float]:
+    if scale_hint is None and sample_template is not None:
+        scale_hint = sample_template.shape[1], sample_template.shape[0]
+    if scale_hint is None:
+        scale_hint = (crop_w, crop_h)
+    base_scale = max(min(crop_w / max(1, scale_hint[0]), crop_h / max(1, scale_hint[1])), 0.12)
+    return sorted(
+        {
+            round(max(0.18, base_scale + delta), 2)
+            for delta in (-0.15, -0.10, -0.06, -0.03, 0.0, 0.03, 0.06, 0.10, 0.15)
+        }
+    )
+
+
+def _best_template_match_in_crop(
+    gray: np.ndarray,
+    template: np.ndarray,
+    scales: list[float],
+) -> tuple[float, tuple[int, int], tuple[int, int]]:
+    crop_h, crop_w = gray.shape[:2]
+    template_h, template_w = template.shape[:2]
+    best_score = -1.0
+    best_loc = (0, 0)
+    best_size = (template_w, template_h)
+    for scale in scales:
+        resized_w = int(template_w * scale)
+        resized_h = int(template_h * scale)
+        if resized_w < 8 or resized_h < 8 or resized_w > crop_w or resized_h > crop_h:
+            continue
+        resized = cv2.resize(template, (resized_w, resized_h))
+        result = cv2.matchTemplate(gray, resized, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+        if max_val > best_score:
+            best_score = float(max_val)
+            best_loc = max_loc
+            best_size = (resized_w, resized_h)
+    return best_score, best_loc, best_size
+
+
+def match_shape_template_variants_in_crop(
+    crop_bgr: np.ndarray,
+    template_variants: dict[str, list[np.ndarray]],
+    *,
+    min_confidence: float = INVENTORY_SLOT_MIN_CONFIDENCE,
+    min_margin: float = INVENTORY_SLOT_MIN_MARGIN,
+    scale_hint: tuple[int, int] | None = None,
+) -> dict:
+    """Match crop against multiple quality variants per shape_id, returning the base shape."""
+    if crop_bgr is None or crop_bgr.size == 0 or not template_variants:
+        return {
+            "shape_id": "Unknown",
+            "confidence": -1.0,
+            "second_best_confidence": -1.0,
+            "margin": 0.0,
+            "match_top_left": None,
+            "match_size": None,
+        }
+
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if len(crop_bgr.shape) == 3 else crop_bgr
+    crop_h, crop_w = gray.shape[:2]
+    sample_template = next(
+        (variant for variants in template_variants.values() for variant in variants),
+        None,
+    )
+    scales = _match_scales_for_crop(
+        crop_h,
+        crop_w,
+        scale_hint=scale_hint,
+        sample_template=sample_template,
+    )
+
+    scores: list[tuple[float, str, tuple[int, int, int, int]]] = []
+    for shape_id, variants in template_variants.items():
+        best_for_shape = -1.0
+        best_loc = (0, 0)
+        best_size = (0, 0)
+        for template in variants:
+            score, match_loc, match_size = _best_template_match_in_crop(gray, template, scales)
+            if score > best_for_shape:
+                best_for_shape = score
+                best_loc = match_loc
+                best_size = match_size
+        if best_for_shape >= 0:
+            scores.append(
+                (
+                    best_for_shape,
+                    shape_id,
+                    (best_loc[0], best_loc[1], best_size[0], best_size[1]),
+                )
+            )
+
+    scores.sort(reverse=True, key=lambda item: item[0])
+    if not scores or scores[0][0] < min_confidence:
+        best_score = scores[0][0] if scores else -1.0
+        return {
+            "shape_id": "Unknown",
+            "confidence": round(best_score, 2),
+            "second_best_confidence": round(scores[1][0], 2) if len(scores) > 1 else -1.0,
+            "margin": 0.0,
+            "match_top_left": None,
+            "match_size": None,
+        }
+
+    best_score, best_shape, (match_x, match_y, match_w, match_h) = scores[0]
+    second_score = scores[1][0] if len(scores) > 1 else -1.0
+    margin = best_score - second_score if second_score >= 0 else best_score
+    if margin < min_margin:
+        return {
+            "shape_id": "Unknown",
+            "confidence": round(best_score, 2),
+            "second_best_confidence": round(second_score, 2),
+            "margin": round(margin, 2),
+            "match_top_left": (match_x, match_y),
+            "match_size": (match_w, match_h),
+        }
+
+    return {
+        "shape_id": best_shape,
+        "confidence": round(best_score, 2),
+        "second_best_confidence": round(second_score, 2),
+        "margin": round(margin, 2),
+        "match_top_left": (match_x, match_y),
+        "match_size": (match_w, match_h),
+    }
+
+
 DEFAULT_INVENTORY_GRID = {
     "origin_2k": [53, 358],
     "cell_size_2k": [169, 140],
@@ -437,19 +569,34 @@ def find_selected_inventory_cell(
 
 
 def locate_shape_in_slot_crop(
-    gold_templates: dict[str, np.ndarray],
+    gold_templates: dict[str, np.ndarray] | dict[str, list[np.ndarray]],
     slot_crop: np.ndarray,
     *,
     candidate_shape_ids: list[str] | None = None,
     min_confidence: float = INVENTORY_SLOT_MIN_CONFIDENCE,
     min_margin: float = INVENTORY_SLOT_MIN_MARGIN,
 ) -> dict:
+    if gold_templates and isinstance(next(iter(gold_templates.values())), list):
+        template_variants = gold_templates
+        if candidate_shape_ids is not None:
+            template_variants = {
+                shape_id: template_variants[shape_id]
+                for shape_id in candidate_shape_ids
+                if shape_id in template_variants
+            }
+        return match_shape_template_variants_in_crop(
+            slot_crop,
+            template_variants,
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+        )
+
     templates = gold_templates
     if candidate_shape_ids is not None:
         templates = {
-            shape_id: gold_templates[shape_id]
+            shape_id: templates[shape_id]
             for shape_id in candidate_shape_ids
-            if shape_id in gold_templates
+            if shape_id in templates
         }
     return match_shape_templates_in_crop(
         slot_crop,

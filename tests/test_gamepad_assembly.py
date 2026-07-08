@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 from src.scanner.assembly_vision import (
     compute_position_error,
+    detect_dragged_piece_anchor,
     estimate_position_error_from_origin,
     needs_position_correction,
 )
@@ -86,6 +87,67 @@ class GamepadAssemblyTests(unittest.TestCase):
         delta_r, delta_c = estimate_position_error_from_origin(1, 3, origin_r=1, origin_c=0)
         self.assertEqual((0.0, 3.0), (delta_r, delta_c))
         self.assertTrue(needs_position_correction(delta_r, delta_c, max_cell_error=0.45))
+
+    def test_inventory_template_variants_default_to_gold_and_purple(self):
+        calibration = dict(self.calibration)
+        calibration["inventory_search"] = {
+            **calibration.get("inventory_search", {}),
+            "template_suffix": "_Inv.png",
+            "purple_template_suffix": "_Inv_Purple.png",
+            "match_qualities": ["Gold", "Purple"],
+        }
+        controller = GamepadAssemblyController.__new__(GamepadAssemblyController)
+        controller.calibration = calibration
+        controller._shape_recognizer = None
+
+        variants = controller._inventory_template_variants_for_shape_match()
+        self.assertIn("H_2", variants)
+        self.assertEqual(2, len(variants["H_2"]))
+
+    def test_inventory_template_variants_honor_explicit_quality(self):
+        calibration = dict(self.calibration)
+        calibration["inventory_search"] = {
+            **calibration.get("inventory_search", {}),
+            "template_suffix": "_Inv.png",
+            "purple_template_suffix": "_Inv_Purple.png",
+            "match_qualities": ["Gold", "Purple"],
+        }
+        controller = GamepadAssemblyController.__new__(GamepadAssemblyController)
+        controller.calibration = calibration
+        controller._shape_recognizer = None
+
+        variants = controller._inventory_template_variants_for_shape_match("Purple")
+        self.assertIn("H_2", variants)
+        self.assertEqual(1, len(variants["H_2"]))
+
+    def test_detect_dragged_piece_anchor_uses_inventory_template_variants(self):
+        import cv2
+        import numpy as np
+
+        from src.scanner.shape_recognizer import GoldShapeRecognizer
+
+        recognizer = GoldShapeRecognizer(
+            template_dir="config/templates",
+            template_suffix="_Inv.png",
+            quality_template_suffixes={"Purple": "_Inv_Purple.png"},
+        )
+        template = recognizer.templates["H_2"]
+        th, tw = template.shape[:2]
+        image = np.zeros((600, 900, 3), dtype=np.uint8)
+        y0, x0 = 180, 320
+        image[y0 : y0 + th, x0 : x0 + tw] = cv2.cvtColor(template, cv2.COLOR_GRAY2BGR)
+        board_region = (300, 150, 700, 500)
+        result = detect_dragged_piece_anchor(
+            image,
+            "H_2",
+            recognizer.templates_for_shape_match(["Gold", "Purple"]),
+            board_region,
+            min_confidence=0.50,
+        )
+
+        self.assertIsNotNone(result.get("anchor_r"))
+        self.assertEqual("inventory_template", result["method"])
+        self.assertGreaterEqual(float(result["confidence"]), 0.50)
 
     def test_select_inventory_drive_wakes_before_search(self):
         calibration = dict(self.calibration)

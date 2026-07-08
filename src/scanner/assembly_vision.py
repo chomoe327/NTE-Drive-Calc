@@ -6,7 +6,10 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from src.features.inventory_import.equipment_classifier import match_shape_templates_in_crop
+from src.features.inventory_import.equipment_classifier import (
+    match_shape_template_variants_in_crop,
+    match_shape_templates_in_crop,
+)
 from src.scanner.config import ScannerConfig
 
 
@@ -231,7 +234,7 @@ def _detect_orange_piece_anchor(
 def detect_dragged_piece_anchor(
     image_bgr: np.ndarray,
     piece_id: str,
-    gold_templates: dict[str, np.ndarray],
+    shape_template_variants: dict[str, list[np.ndarray]] | dict[str, np.ndarray],
     board_region: tuple[int, int, int, int],
     *,
     grid_rows: int = 5,
@@ -259,14 +262,24 @@ def detect_dragged_piece_anchor(
             "method": None,
         }
 
-    template = gold_templates.get(piece_id)
-    if template is not None:
-        match = match_shape_templates_in_crop(
-            detect_crop,
-            {piece_id: template},
-            min_confidence=min_confidence,
-            min_margin=0.0,
-        )
+    variants = shape_template_variants.get(piece_id)
+    if isinstance(variants, np.ndarray):
+        variants = [variants]
+    if variants:
+        if len(variants) == 1:
+            match = match_shape_templates_in_crop(
+                detect_crop,
+                {piece_id: variants[0]},
+                min_confidence=min_confidence,
+                min_margin=0.0,
+            )
+        else:
+            match = match_shape_template_variants_in_crop(
+                detect_crop,
+                {piece_id: variants},
+                min_confidence=min_confidence,
+                min_margin=0.0,
+            )
         if match["shape_id"] == piece_id:
             top_left = match.get("match_top_left") or (0, 0)
             match_w, match_h = match.get("match_size") or (0, 0)
@@ -282,7 +295,7 @@ def detect_dragged_piece_anchor(
                     abs_x + match_w,
                     abs_y + match_h,
                 ),
-                "method": "gold_template",
+                "method": "inventory_template",
             }
 
     orange = _detect_orange_piece_anchor(
@@ -299,13 +312,21 @@ def detect_dragged_piece_anchor(
     )
     if orange is None:
         template_conf = -1.0
-        if template is not None:
-            fallback = match_shape_templates_in_crop(
-                detect_crop,
-                {piece_id: template},
-                min_confidence=0.0,
-                min_margin=0.0,
-            )
+        if variants:
+            if len(variants) == 1:
+                fallback = match_shape_templates_in_crop(
+                    detect_crop,
+                    {piece_id: variants[0]},
+                    min_confidence=0.0,
+                    min_margin=0.0,
+                )
+            else:
+                fallback = match_shape_template_variants_in_crop(
+                    detect_crop,
+                    {piece_id: variants},
+                    min_confidence=0.0,
+                    min_margin=0.0,
+                )
             template_conf = float(fallback.get("confidence") or -1.0)
         return {
             "anchor_r": None,
