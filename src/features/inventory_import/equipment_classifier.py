@@ -249,8 +249,8 @@ def match_inventory_slot_templates_execute_style(
 ) -> dict:
     """Match an inventory cell crop against all _Inv variants; highest score wins.
 
-    Uses the same resize-to-crop strategy as execute-page ``ShapeRecognizer``,
-    but competes across every Gold/Purple inventory template at once.
+    Competes across every Gold/Purple inventory template at once, using the same
+    multi-scale local matching as inventory import parsing.
     """
     empty_result = {
         "shape_id": "Unknown",
@@ -269,15 +269,23 @@ def match_inventory_slot_templates_execute_style(
     if crop_h < 8 or crop_w < 8:
         return dict(empty_result)
 
+    sample_template = next(
+        (variant for variants in template_variants.values() for variant in variants),
+        None,
+    )
+    scales = _match_scales_for_crop(
+        crop_h,
+        crop_w,
+        sample_template=sample_template,
+    )
+
     scores: list[tuple[float, str]] = []
     for shape_id, variants in template_variants.items():
         for template in variants:
             if template is None or template.size == 0:
                 continue
-            resized = cv2.resize(template, (crop_w, crop_h))
-            result = cv2.matchTemplate(gray, resized, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, _ = cv2.minMaxLoc(result)
-            scores.append((float(max_val), shape_id))
+            score, _, _ = _best_template_match_in_crop(gray, template, scales)
+            scores.append((score, shape_id))
 
     if not scores:
         return dict(empty_result)
@@ -562,15 +570,10 @@ def _cell_index_from_triangle(
     columns = int(grid_layout["grid_columns"])
     rows = int(grid_layout["grid_rows"])
 
-    if selection_box is not None:
-        x1, y1, _, _ = selection_box
-    else:
-        center_x = float(triangle_match["center_x"])
-        x1 = center_x - cell_width / 2
-        y1 = float(triangle_match["bottom_y"])
-
-    col = int((x1 - origin_x) / cell_width)
-    row = int((y1 - origin_y) / cell_height)
+    center_x = float(triangle_match["center_x"])
+    bottom_y = float(triangle_match["bottom_y"])
+    col = int(round((center_x - origin_x - cell_width / 2) / cell_width))
+    row = int(round((bottom_y - origin_y - cell_height * 0.05) / cell_height))
     col = max(0, min(columns - 1, col))
     row = max(0, min(rows - 1, row))
     return row, col

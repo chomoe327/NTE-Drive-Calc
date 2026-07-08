@@ -253,10 +253,20 @@ class GamepadAssemblyController:
             return "当前未能定位选中格子"
         return f"当前选中第 {slot_index} 格 (行{slot_row}, 列{slot_col})"
 
-    def _tap_left_stick(self, stick_x: float, stick_y: float) -> None:
+    def _tap_left_stick(
+        self,
+        stick_x: float,
+        stick_y: float,
+        *,
+        vertical: bool = False,
+    ) -> None:
         nav = self._inventory_nav_cfg()
-        tap_seconds = float(nav.get("tap_seconds", 0.10) or 0.10)
-        settle_seconds = float(nav.get("settle_seconds", 0.25) or 0.25)
+        if vertical:
+            tap_seconds = float(nav.get("row_tap_seconds", 0.15) or 0.15)
+            settle_seconds = float(nav.get("row_settle_seconds", 0.30) or 0.30)
+        else:
+            tap_seconds = float(nav.get("tap_seconds", 0.10) or 0.10)
+            settle_seconds = float(nav.get("settle_seconds", 0.25) or 0.25)
         self.gamepad.left_joystick_float(x_value_float=float(stick_x), y_value_float=float(stick_y))
         self.gamepad.update()
         time.sleep(tap_seconds)
@@ -266,12 +276,77 @@ class GamepadAssemblyController:
     def _tap_inventory_right(self) -> None:
         nav = self._inventory_nav_cfg()
         right_stick_x = float(nav.get("right_stick_x", 1.0) or 1.0)
-        self._tap_left_stick(right_stick_x, 0.0)
+        self._tap_left_stick(right_stick_x, 0.0, vertical=False)
 
     def _tap_inventory_down(self) -> None:
         nav = self._inventory_nav_cfg()
         down_stick_y = float(nav.get("down_stick_y", -1.0) or -1.0)
-        self._tap_left_stick(0.0, down_stick_y)
+        self._tap_left_stick(0.0, down_stick_y, vertical=True)
+
+    def _inventory_slot_position(self, recognition: dict) -> tuple[int | None, int | None]:
+        row = recognition.get("slot_row")
+        col = recognition.get("slot_col")
+        if row is None or col is None:
+            return None, None
+        return int(row), int(col)
+
+    def _advance_inventory_selection(
+        self,
+        *,
+        row: int | None,
+        col: int | None,
+        grid_columns: int,
+        grid_rows: int,
+        step: int,
+        max_steps: int,
+    ) -> str:
+        if row is None or col is None:
+            logger.warning(
+                f"  [库存搜索 {step}/{max_steps}] 未能定位当前格，尝试右移一格"
+            )
+            self._tap_inventory_right()
+            return "right"
+
+        if col < grid_columns - 1:
+            logger.info(
+                f"  [库存搜索 {step}/{max_steps}] 右移一格 "
+                f"(当前 行{row} 列{col} → 目标列{col + 1})"
+            )
+            self._tap_inventory_right()
+            return "right"
+
+        if row < grid_rows - 1:
+            logger.info(
+                f"  [库存搜索 {step}/{max_steps}] 下移一行 "
+                f"(当前 行{row} 列{col} → 目标行{row + 1})"
+            )
+            self._tap_inventory_down()
+            return "down"
+
+        raise InventoryDriveNotFoundError(
+            f"已遍历库存网格末尾（行{row} 列{col}），仍未找到目标驱动。"
+        )
+
+    def _log_inventory_move_anomaly(
+        self,
+        move: str,
+        prev_row: int | None,
+        prev_col: int | None,
+        new_row: int | None,
+        new_col: int | None,
+    ) -> None:
+        if prev_row is None or prev_col is None or new_row is None or new_col is None:
+            return
+        if move == "right" and (new_row != prev_row or new_col != prev_col + 1):
+            logger.warning(
+                f"右移结果异常: ({prev_row}, {prev_col}) → ({new_row}, {new_col})，"
+                "将以视觉定位为准继续搜索。"
+            )
+        elif move == "down" and (new_row != prev_row + 1 or new_col != 0):
+            logger.warning(
+                f"下移结果异常: ({prev_row}, {prev_col}) → ({new_row}, {new_col})，"
+                "将以视觉定位为准继续搜索。"
+            )
 
     def _position_correction_cfg(self) -> dict:
         return self.calibration.get("position_correction", {}) or {}
@@ -520,6 +595,7 @@ class GamepadAssemblyController:
         search_cfg = self._inventory_search_cfg()
         max_steps = max(1, int(search_cfg.get("max_steps", 20) or 20))
         grid_columns = max(1, int(search_cfg.get("grid_columns", 4) or 4))
+        grid_rows = max(1, int(self._inventory_grid_cfg().get("grid_rows", 5) or 5))
 
         self._wake_gamepad()
         self._wait_after_inventory_move()
@@ -538,15 +614,20 @@ class GamepadAssemblyController:
 
         for step in range(1, max_steps + 1):
             self._check_stopped()
-            if step % grid_columns == 0:
-                logger.info(f"  [库存搜索 {step}/{max_steps}] 下移一行")
-                self._tap_inventory_down()
-            else:
-                logger.info(f"  [库存搜索 {step}/{max_steps}] 右移一格")
-                self._tap_inventory_right()
+            prev_row, prev_col = self._inventory_slot_position(recognition)
+            move = self._advance_inventory_selection(
+                row=prev_row,
+                col=prev_col,
+                grid_columns=grid_columns,
+                grid_rows=grid_rows,
+                step=step,
+                max_steps=max_steps,
+            )
 
             self._wait_after_inventory_move()
             recognition = self._recognize_selected_drive_shape(quality=quality)
+            new_row, new_col = self._inventory_slot_position(recognition)
+            self._log_inventory_move_anomaly(move, prev_row, prev_col, new_row, new_col)
             logger.info(
                 f"  {self._format_selected_slot_log(recognition)} | "
                 f"triangle_conf={recognition.get('triangle_confidence')} "
