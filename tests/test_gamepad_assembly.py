@@ -67,6 +67,17 @@ class GamepadAssemblyTests(unittest.TestCase):
         self.assertEqual("01_right", moves[0].label)
         self.assertEqual(StickMove(0.95, 0.0, 0.02, "01_right"), moves[0])
 
+    def test_moves_from_config_list_appends_target_nudges(self):
+        calibration = dict(self.calibration)
+        calibration["grid_origin_r"] = 1
+        calibration["grid_origin_c"] = 0
+        controller = GamepadAssemblyController.__new__(GamepadAssemblyController)
+        controller.calibration = calibration
+        moves = controller._moves_from_config_list(2, 1)
+        labels = [move.label for move in moves]
+        self.assertIn("target_r_1", labels)
+        self.assertIn("target_c_1", labels)
+
     def test_compute_position_error_returns_none_when_detection_missing(self):
         self.assertIsNone(compute_position_error(None, 2.0, 1, 3))
         self.assertFalse(
@@ -172,6 +183,7 @@ class GamepadAssemblyTests(unittest.TestCase):
                 return_value={"shape_id": "H_2", "confidence": 0.95, "margin": 0.12}
             )
             controller._correct_drag_position = MagicMock(return_value=[])
+            controller._handle_post_place_dialogs = MagicMock()
             moves = controller.drag_to_grid_cell(1, 0, piece_id="H_2")
 
         self.assertEqual(2, len(moves))
@@ -179,6 +191,7 @@ class GamepadAssemblyTests(unittest.TestCase):
         self.assertEqual((0.0, 0.0), fake_gamepad.left_stick)
         controller.select_inventory_drive_by_shape.assert_called_once_with("H_2")
         controller._correct_drag_position.assert_called_once_with("H_2", 1, 0)
+        controller._handle_post_place_dialogs.assert_called_once()
 
 
 if __name__ == "__main__":

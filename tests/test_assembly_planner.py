@@ -9,9 +9,12 @@ from src.scanner.assembly_planner import (
     ASSEMBLY_TEST_SHAPE,
     find_first_inventory_drive,
     find_shape_anchor_in_blueprint,
+    iter_blueprint_piece_placements,
     plan_assembly,
+    plan_full_assembly,
     plan_test_placement,
 )
+from src.solver.orchestrator import NTEPipelineOrchestrator
 
 
 class AssemblyPlannerTests(unittest.TestCase):
@@ -84,6 +87,56 @@ class AssemblyPlannerTests(unittest.TestCase):
         self.assertEqual(0, plan.start_c)
         self.assertEqual("inv_h2", plan.inventory_drive["uid"])
         self.assertEqual("plan_h2", plan.equipped_drive["uid"])
+
+    def test_iter_blueprint_piece_placements_finds_multiple_shapes(self):
+        blueprint = [
+            ["XX", "XX", "XX", "XX", "XX"],
+            ["H_2", "H_2", "V_2", "0", "0"],
+            ["0", "0", "V_2", "0", "0"],
+            ["0", "0", "0", "0", "0"],
+            ["0", "0", "0", "0", "0"],
+        ]
+        orchestrator = NTEPipelineOrchestrator(config_dir="config")
+        pieces = iter_blueprint_piece_placements(blueprint, orchestrator.shapes_db)
+        self.assertEqual(2, len(pieces))
+        self.assertEqual(
+            [("H_2", 1, 0), ("V_2", 1, 2)],
+            [(piece.piece_id, piece.start_r, piece.start_c) for piece in pieces],
+        )
+
+    def test_plan_full_assembly_reads_all_jiuyuan_pieces(self):
+        blueprint = [
+            ["XX", "XX", "XX", "XX", "XX"],
+            ["H_2", "H_2", "V_2", "0", "0"],
+            ["0", "0", "V_2", "0", "0"],
+            ["0", "0", "0", "0", "0"],
+            ["0", "0", "0", "0", "0"],
+        ]
+        equipped_state = {
+            ASSEMBLY_TEST_ROLE: {
+                "blueprint_layout": blueprint,
+                "equipped_drives": [],
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "equipped_state.json"
+            state_path.write_text(json.dumps(equipped_state, ensure_ascii=False), encoding="utf-8")
+            old_user_dir = runtime.USER_CONFIG_DIR
+            runtime.USER_CONFIG_DIR = Path(tmp)
+            try:
+                plan = plan_full_assembly(
+                    role_name=ASSEMBLY_TEST_ROLE,
+                    config_dir="config",
+                    state_path=state_path,
+                )
+            finally:
+                runtime.USER_CONFIG_DIR = old_user_dir
+
+        self.assertEqual(ASSEMBLY_TEST_ROLE, plan.blueprint_role)
+        self.assertEqual(2, len(plan.pieces))
+        self.assertEqual("H_2", plan.pieces[0].piece_id)
+        self.assertEqual("V_2", plan.pieces[1].piece_id)
 
 
 if __name__ == "__main__":

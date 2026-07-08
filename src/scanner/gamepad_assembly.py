@@ -19,6 +19,7 @@ from src.features.inventory_import.equipment_classifier import (
     load_inventory_selection_triangle,
     locate_selected_inventory_shape,
 )
+from src.scanner.assembly_dialog import detect_equip_transfer_dialog
 from src.scanner.assembly_vision import (
     assembly_board_region,
     compute_position_error,
@@ -56,6 +57,34 @@ class AssemblyTestResult:
     debug_screenshots: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class AssemblyPieceResult:
+    piece_id: str
+    start_r: int
+    start_c: int
+    applied_moves: list[StickMove]
+    success: bool
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class FullAssemblyResult:
+    blueprint_role: str
+    window_title: str
+    before_screenshot: str
+    after_screenshot: str
+    pieces: list[AssemblyPieceResult]
+    debug_screenshots: list[str] = field(default_factory=list)
+
+    @property
+    def success_count(self) -> int:
+        return sum(1 for piece in self.pieces if piece.success)
+
+    @property
+    def failed_pieces(self) -> list[AssemblyPieceResult]:
+        return [piece for piece in self.pieces if not piece.success]
+
+
 def load_assembly_calibration(config_path: Path | None = None) -> dict:
     path = config_path or runtime.CONFIG_DIR / "assembly_calibration.json"
     bundled = runtime.BUNDLED_CONFIG_DIR / "assembly_calibration.json"
@@ -90,6 +119,7 @@ class GamepadAssemblyController:
         self._debug_counter = 0
         self._shape_recognizer: GoldShapeRecognizer | None = None
         self._selection_triangle_template = None
+        self._ocr_engine = None
         logger.info("正在连接虚拟 Xbox 360 手柄（装配测试）...")
         try:
             import vgamepad as vg
@@ -206,6 +236,95 @@ class GamepadAssemblyController:
 
     def _position_correction_cfg(self) -> dict:
         return self.calibration.get("position_correction", {}) or {}
+
+    def _equip_transfer_dialog_cfg(self) -> dict:
+        return self.calibration.get("equip_transfer_dialog", {}) or {}
+
+    def _get_ocr_engine(self):
+        if self._ocr_engine is None:
+            from src.scanner.ocr_engine import OCREngine
+
+            self._ocr_engine = OCREngine()
+        return self._ocr_engine
+
+    def _press_a_tap(self, hold_seconds: float | None = None, settle_seconds: float | None = None) -> None:
+        dialog_cfg = self._equip_transfer_dialog_cfg()
+        hold = float(
+            hold_seconds
+            if hold_seconds is not None
+            else dialog_cfg.get("confirm_a_hold_seconds", 0.08) or 0.08
+        )
+        settle = float(
+            settle_seconds
+            if settle_seconds is not None
+            else dialog_cfg.get("confirm_a_settle_seconds", 0.35) or 0.35
+        )
+        self.gamepad.press_button(button=self._buttons.XUSB_GAMEPAD_A)
+        self.gamepad.update()
+        time.sleep(hold)
+        self.gamepad.release_button(button=self._buttons.XUSB_GAMEPAD_A)
+        self.gamepad.update()
+        time.sleep(settle)
+
+    def _detect_equip_transfer_dialog(self) -> bool:
+        dialog_cfg = self._equip_transfer_dialog_cfg()
+        if not dialog_cfg.get("enabled", True):
+            return False
+        image = self._capture_foreground_bgr()
+        keywords = dialog_cfg.get("keywords") or None
+        return detect_equip_transfer_dialog(
+            image,
+            ocr_engine=self._get_ocr_engine(),
+            keywords=keywords,
+            width_ratio=float(dialog_cfg.get("crop_width_ratio", 0.72) or 0.72),
+            height_ratio=float(dialog_cfg.get("crop_height_ratio", 0.55) or 0.55),
+        )
+
+    def _confirm_equip_transfer_dialog(self) -> bool:
+        dialog_cfg = self._equip_transfer_dialog_cfg()
+        if not dialog_cfg.get("enabled", True):
+            return False
+
+        settle_seconds = float(dialog_cfg.get("detect_settle_seconds", 0.45) or 0.45)
+        if settle_seconds > 0:
+            time.sleep(settle_seconds)
+
+        if not self._detect_equip_transfer_dialog():
+            return False
+
+        logger.warning("检测到装备转移确认框，准备点击「确认」。")
+        self._capture_debug("equip_transfer_dialog")
+
+        nav_moves = dialog_cfg.get("confirm_nav") or [{"stick_x": 1.0, "stick_y": 0.0}]
+        tap_seconds = float(dialog_cfg.get("nav_tap_seconds", 0.10) or 0.10)
+        nav_settle_seconds = float(dialog_cfg.get("nav_settle_seconds", 0.20) or 0.20)
+        for index, item in enumerate(nav_moves, 1):
+            if not isinstance(item, dict):
+                continue
+            stick_x = float(item.get("stick_x", 0.0) or 0.0)
+            stick_y = float(item.get("stick_y", 0.0) or 0.0)
+            logger.info(
+                f"  [确认框导航 {index}/{len(nav_moves)}] stick=({stick_x:.3f}, {stick_y:.3f})"
+            )
+            self.gamepad.left_joystick_float(x_value_float=stick_x, y_value_float=stick_y)
+            self.gamepad.update()
+            time.sleep(tap_seconds)
+            self._reset_stick()
+            time.sleep(nav_settle_seconds)
+
+        self._press_a_tap()
+        post_confirm_seconds = float(dialog_cfg.get("post_confirm_seconds", 0.50) or 0.50)
+        if post_confirm_seconds > 0:
+            time.sleep(post_confirm_seconds)
+        self._capture_debug("after_equip_transfer_confirm")
+        logger.success("已确认装备转移。")
+        return True
+
+    def _handle_post_place_dialogs(self) -> None:
+        try:
+            self._confirm_equip_transfer_dialog()
+        except Exception as exc:
+            logger.warning(f"装备转移确认框处理失败，请人工检查: {exc}")
 
     def _get_shape_recognizer(self) -> GoldShapeRecognizer:
         if self._shape_recognizer is None:
@@ -434,6 +553,87 @@ class GamepadAssemblyController:
 
         settle_seconds = float(self.calibration.get("settle_seconds", 0.25) or 0.25)
         time.sleep(settle_seconds)
+        self._handle_post_place_dialogs()
+
+    def assemble_piece(self, start_r: int, start_c: int, piece_id: str) -> list[StickMove]:
+        return self.drag_to_grid_cell(start_r, start_c, piece_id=piece_id)
+
+    def assemble_all_pieces(
+        self,
+        pieces: list[tuple[str, int, int]],
+        *,
+        stop_on_error: bool = True,
+    ) -> list[AssemblyPieceResult]:
+        results: list[AssemblyPieceResult] = []
+        total = len(pieces)
+        for index, (piece_id, start_r, start_c) in enumerate(pieces, 1):
+            logger.warning(
+                f"开始装配第 {index}/{total} 块: {piece_id} → ({start_r}, {start_c})"
+            )
+            try:
+                applied_moves = self.assemble_piece(start_r, start_c, piece_id)
+                results.append(
+                    AssemblyPieceResult(
+                        piece_id=piece_id,
+                        start_r=start_r,
+                        start_c=start_c,
+                        applied_moves=applied_moves,
+                        success=True,
+                    )
+                )
+                logger.success(
+                    f"第 {index}/{total} 块装配完成: {piece_id} → ({start_r}, {start_c})"
+                )
+            except Exception as exc:
+                logger.error(
+                    f"第 {index}/{total} 块装配失败: {piece_id} → ({start_r}, {start_c}) | {exc}"
+                )
+                results.append(
+                    AssemblyPieceResult(
+                        piece_id=piece_id,
+                        start_r=start_r,
+                        start_c=start_c,
+                        applied_moves=[],
+                        success=False,
+                        error=str(exc),
+                    )
+                )
+                if stop_on_error:
+                    break
+        return results
+
+    def _nudge_moves_to_target(self, start_r: int, start_c: int) -> list[StickMove]:
+        origin_r = int(self.calibration.get("grid_origin_r", 0) or 0)
+        origin_c = int(self.calibration.get("grid_origin_c", 0) or 0)
+        delta_r = int(start_r) - origin_r
+        delta_c = int(start_c) - origin_c
+        if delta_r == 0 and delta_c == 0:
+            return []
+
+        nudge = self.calibration.get("grid_nudge", {}) or {}
+        per_row = float(nudge.get("stick_y_per_row", 0.0) or 0.0)
+        per_col = float(nudge.get("stick_x_per_col", 0.0) or 0.0)
+        per_step = float(nudge.get("duration_per_step", 0.12) or 0.12)
+        moves: list[StickMove] = []
+        for step in range(abs(delta_r)):
+            moves.append(
+                StickMove(
+                    stick_x=0.0,
+                    stick_y=per_row if delta_r > 0 else -per_row,
+                    duration_seconds=per_step,
+                    label=f"target_r_{step + 1}",
+                )
+            )
+        for step in range(abs(delta_c)):
+            moves.append(
+                StickMove(
+                    stick_x=per_col if delta_c > 0 else -per_col,
+                    stick_y=0.0,
+                    duration_seconds=per_step,
+                    label=f"target_c_{step + 1}",
+                )
+            )
+        return moves
 
     def _moves_from_config_list(self, start_r: int, start_c: int) -> list[StickMove]:
         configured = self.calibration.get("drag_moves")
@@ -452,6 +652,7 @@ class GamepadAssemblyController:
                     )
                 )
             if moves:
+                moves.extend(self._nudge_moves_to_target(start_r, start_c))
                 return moves
 
         base = self.calibration.get("drag_from_inventory_focus", {}) or {}
@@ -652,5 +853,35 @@ def run_assembly_drag_test(
         before_screenshot=before_path,
         after_screenshot=after_path,
         applied_moves=applied_moves,
+        debug_screenshots=list(controller._debug_screenshots),
+    )
+
+
+def run_full_assembly_test(
+    *,
+    blueprint_role: str,
+    pieces: list[tuple[str, int, int]],
+    window_title: str,
+    delay_seconds: float = 3.0,
+    calibration: dict | None = None,
+    stop_on_error: bool = True,
+) -> FullAssemblyResult:
+    merged_calibration = dict(calibration or load_assembly_calibration())
+    controller = GamepadAssemblyController(calibration=merged_calibration)
+    before_path = controller.capture_screenshot("assembly_full_before.png")
+
+    logger.warning(
+        f"完整装配测试将在 {delay_seconds:.1f} 秒后接管控制，共 {len(pieces)} 块驱动。"
+    )
+    time.sleep(max(0.0, float(delay_seconds)))
+
+    piece_results = controller.assemble_all_pieces(pieces, stop_on_error=stop_on_error)
+    after_path = controller.capture_screenshot("assembly_full_after.png")
+    return FullAssemblyResult(
+        blueprint_role=blueprint_role,
+        window_title=window_title,
+        before_screenshot=before_path,
+        after_screenshot=after_path,
+        pieces=piece_results,
         debug_screenshots=list(controller._debug_screenshots),
     )

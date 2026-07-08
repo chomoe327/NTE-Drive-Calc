@@ -13,7 +13,9 @@ from src.features.role.dao import load_real_inventory
 from src.solver.dfs_puzzle import DFSPuzzleSolver
 from src.solver.orchestrator import NTEPipelineOrchestrator
 
-ASSEMBLY_TEST_ROLE = "九原"
+ASSEMBLY_BLUEPRINT_ROLE = "九原"
+ASSEMBLY_UI_ROLE = "真红"
+ASSEMBLY_TEST_ROLE = ASSEMBLY_BLUEPRINT_ROLE
 ASSEMBLY_TEST_SHAPE = "H_2"
 
 
@@ -38,6 +40,21 @@ class AssemblyPlan:
     inventory_drive: dict[str, Any] | None
     equipped_drive: dict[str, Any] | None
     piece_matrix: List[List[int]]
+
+
+@dataclass(frozen=True)
+class AssemblyPiecePlan:
+    piece_id: str
+    start_r: int
+    start_c: int
+    piece_matrix: List[List[int]]
+
+
+@dataclass(frozen=True)
+class FullAssemblyPlan:
+    blueprint_role: str
+    blueprint_layout: list[list[str]]
+    pieces: list[AssemblyPiecePlan]
 
 
 def _first_empty_cell(board: List[List[int]]) -> tuple[int, int]:
@@ -116,6 +133,70 @@ def find_shape_anchor_in_blueprint(
     return find_piece_anchor(board, piece_id, piece_matrix)
 
 
+def _is_empty_blueprint_cell(cell: Any) -> bool:
+    return cell in ("XX", -1, "0", 0, None, "")
+
+
+def iter_blueprint_piece_placements(
+    blueprint_layout: list[list[Any]],
+    shapes_db: dict[str, Any],
+) -> list[AssemblyPiecePlan]:
+    """Enumerate every drive piece instance on a saved blueprint layout."""
+    board = blueprint_layout_to_board(blueprint_layout)
+    if not board:
+        raise ValueError("配装图纸为空，无法解析驱动块位置。")
+
+    rows = len(board)
+    cols = len(board[0]) if board else 0
+    visited = [[False] * cols for _ in range(rows)]
+    placements: list[AssemblyPiecePlan] = []
+
+    for row_index in range(rows):
+        for col_index in range(cols):
+            cell = board[row_index][col_index]
+            if _is_empty_blueprint_cell(cell) or visited[row_index][col_index]:
+                continue
+
+            piece_id = str(cell)
+            if piece_id not in shapes_db:
+                raise ValueError(f"图纸中的形状 {piece_id!r} 不存在于 shapes.json。")
+
+            component_cells: list[tuple[int, int]] = []
+            stack = [(row_index, col_index)]
+            visited[row_index][col_index] = True
+            while stack:
+                current_r, current_c = stack.pop()
+                component_cells.append((current_r, current_c))
+                for delta_r, delta_c in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                    next_r = current_r + delta_r
+                    next_c = current_c + delta_c
+                    if not (0 <= next_r < rows and 0 <= next_c < cols):
+                        continue
+                    if visited[next_r][next_c]:
+                        continue
+                    if board[next_r][next_c] != piece_id:
+                        continue
+                    visited[next_r][next_c] = True
+                    stack.append((next_r, next_c))
+
+            piece_matrix = shapes_db[piece_id].matrix
+            sub_board = [[0 for _ in range(cols)] for _ in range(rows)]
+            for current_r, current_c in component_cells:
+                sub_board[current_r][current_c] = piece_id
+            start_r, start_c = find_piece_anchor(sub_board, piece_id, piece_matrix)
+            placements.append(
+                AssemblyPiecePlan(
+                    piece_id=piece_id,
+                    start_r=start_r,
+                    start_c=start_c,
+                    piece_matrix=piece_matrix,
+                )
+            )
+
+    placements.sort(key=lambda item: (item.start_r, item.start_c, item.piece_id))
+    return placements
+
+
 def find_first_inventory_drive(
     inventory: list[dict[str, Any]] | dict[str, Any] | None,
     shape_id: str,
@@ -177,6 +258,35 @@ def plan_assembly(
         inventory_drive=inventory_drive,
         equipped_drive=equipped_drive,
         piece_matrix=piece_matrix,
+    )
+
+
+def plan_full_assembly(
+    role_name: str = ASSEMBLY_BLUEPRINT_ROLE,
+    *,
+    config_dir: str = "config",
+    equipped_state: dict[str, Any] | None = None,
+    state_path: Path | None = None,
+) -> FullAssemblyPlan:
+    """Build a multi-piece assembly plan from a saved role blueprint layout."""
+    state = equipped_state if equipped_state is not None else load_equipped_state(state_path)
+    role_state = state.get(role_name)
+    if not isinstance(role_state, dict):
+        raise ValueError(f"配装文件中没有角色 {role_name!r} 的方案。")
+
+    blueprint_layout = role_state.get("blueprint_layout") or []
+    if not blueprint_layout:
+        raise ValueError(f"角色 {role_name!r} 的配装图纸为空，请先在配装页保存统筹结果。")
+
+    orchestrator = NTEPipelineOrchestrator(config_dir=config_dir)
+    pieces = iter_blueprint_piece_placements(blueprint_layout, orchestrator.shapes_db)
+    if not pieces:
+        raise ValueError(f"角色 {role_name!r} 的配装图纸中没有可装配的驱动块。")
+
+    return FullAssemblyPlan(
+        blueprint_role=role_name,
+        blueprint_layout=[list(row) for row in blueprint_layout],
+        pieces=pieces,
     )
 
 

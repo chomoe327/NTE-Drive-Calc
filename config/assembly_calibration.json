@@ -75,6 +75,21 @@
     },
     "grid_origin_r": 1,
     "grid_origin_c": 0,
+    "equip_transfer_dialog": {
+        "enabled": true,
+        "keywords": ["是否镶嵌于此处", "该装备已镶嵌", "已镶嵌在"],
+        "detect_settle_seconds": 0.45,
+        "crop_width_ratio": 0.72,
+        "crop_height_ratio": 0.55,
+        "confirm_nav": [
+            {"stick_x": 1.0, "stick_y": 0.0}
+        ],
+        "nav_tap_seconds": 0.10,
+        "nav_settle_seconds": 0.20,
+        "confirm_a_hold_seconds": 0.08,
+        "confirm_a_settle_seconds": 0.35,
+        "post_confirm_seconds": 0.50
+    },
     "debug_capture": {
         "enabled": true,
         "after_gamepad_wake": true,
