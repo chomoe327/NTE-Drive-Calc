@@ -163,7 +163,7 @@ class GamepadAssemblyTests(unittest.TestCase):
             controller._tap_inventory_right = MagicMock()
             controller._tap_inventory_down = MagicMock()
             controller._recognize_selected_drive_shape = MagicMock(
-                return_value={"shape_id": "H_2", "confidence": 0.92}
+                return_value={"shape_id": "H_2", "confidence": 0.92, "margin": 0.18}
             )
             controller._capture_debug = MagicMock()
             result = controller.select_inventory_drive_by_shape("H_2")
@@ -190,9 +190,9 @@ class GamepadAssemblyTests(unittest.TestCase):
     def test_select_inventory_drive_moves_until_shape_matches(self):
         fake_gamepad = FakeGamepad()
         recognitions = [
-            {"shape_id": "V_2", "confidence": 0.90},
-            {"shape_id": "L_3_BL", "confidence": 0.88},
-            {"shape_id": "H_2", "confidence": 0.91},
+            {"shape_id": "V_2", "confidence": 0.90, "margin": 0.10},
+            {"shape_id": "L_3_BL", "confidence": 0.88, "margin": 0.08},
+            {"shape_id": "H_2", "confidence": 0.91, "margin": 0.12},
         ]
 
         with patch.dict(

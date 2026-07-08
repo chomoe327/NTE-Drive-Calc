@@ -108,6 +108,24 @@ class InventoryDriveNotFoundError(RuntimeError):
     """Raised when shape-based inventory search cannot find the target drive."""
 
 
+class AssemblyStoppedError(RuntimeError):
+    """Raised when the user aborts assembly via the stop hotkey."""
+
+
+_active_assembly_controller: "GamepadAssemblyController | None" = None
+
+
+def set_active_assembly_controller(controller: "GamepadAssemblyController | None") -> None:
+    global _active_assembly_controller
+    _active_assembly_controller = controller
+
+
+def request_assembly_stop() -> None:
+    controller = _active_assembly_controller
+    if controller is not None:
+        controller.stop()
+
+
 class GamepadAssemblyController:
     """Drive-block drag controller built on top of ViGEm virtual gamepad."""
 
@@ -136,6 +154,24 @@ class GamepadAssemblyController:
             raise
         time.sleep(2)
         logger.success("虚拟手柄连接完成（装配测试）")
+        self._drag_active = False
+        self._current_stick = (0.0, 0.0)
+        self._stopped = False
+
+    def stop(self) -> None:
+        self._stopped = True
+
+    def _check_stopped(self) -> None:
+        if self._stopped:
+            raise AssemblyStoppedError("用户已中止自动装配。")
+
+    def _abort_drag_hold(self) -> None:
+        if not self._drag_active:
+            return
+        logger.warning("中止拖动：松开 A 并复位摇杆")
+        self.gamepad.left_joystick_float(x_value_float=0.0, y_value_float=0.0)
+        self.gamepad.release_button(button=self._buttons.XUSB_GAMEPAD_A)
+        self.gamepad.update()
         self._drag_active = False
         self._current_stick = (0.0, 0.0)
 
@@ -385,13 +421,16 @@ class GamepadAssemblyController:
 
     def _recognize_selected_drive_shape(
         self,
-        shape_id: str | None = None,
         *,
         quality: str | None = None,
     ) -> dict:
         image = self._capture_foreground_bgr()
         search_cfg = self._inventory_search_cfg()
         min_margin = float(search_cfg.get("min_margin", 0.05) or 0.05)
+        min_confidence = float(search_cfg.get("min_confidence", 0.65) or 0.65)
+        high_confidence = float(
+            search_cfg.get("high_confidence", 0.95) or 0.95
+        )
         min_triangle_confidence = float(
             search_cfg.get("selection_min_triangle_confidence", 0.80) or 0.80
         )
@@ -404,18 +443,6 @@ class GamepadAssemblyController:
         content_rect = self._inventory_content_rect(image)
         triangle_template = self._get_selection_triangle_template()
         templates = self._inventory_template_variants_for_shape_match(quality)
-        candidate_ids = [shape_id] if shape_id else None
-        if candidate_ids is not None:
-            templates = {
-                sid: templates[sid]
-                for sid in candidate_ids
-                if sid in templates
-            }
-            min_confidence = float(
-                search_cfg.get("target_shape_min_confidence", 0.55) or 0.55
-            )
-        else:
-            min_confidence = float(search_cfg.get("min_confidence", 0.65) or 0.65)
         result = locate_selected_inventory_shape(
             templates,
             image,
@@ -423,7 +450,8 @@ class GamepadAssemblyController:
             grid_layout=grid_layout,
             triangle_template=triangle_template,
             min_confidence=min_confidence,
-            min_margin=0.0 if candidate_ids else min_margin,
+            high_confidence=high_confidence,
+            min_margin=min_margin,
             min_triangle_confidence=min_triangle_confidence,
             triangle_size_2k=triangle_size_2k,
             base_width=base_width,
@@ -438,7 +466,8 @@ class GamepadAssemblyController:
                 f"triangle={triangle_top_left} "
                 f"triangle_conf={result.get('triangle_confidence')} "
                 f"shape_margin={result.get('margin')} "
-                f"second={result.get('second_best_confidence')}"
+                f"second={result.get('second_best_confidence')} "
+                f"high_conf={result.get('high_confidence_accepted')}"
             )
         return result
 
@@ -447,9 +476,18 @@ class GamepadAssemblyController:
         min_confidence = float(
             search_cfg.get("target_shape_min_confidence", 0.55) or 0.55
         )
+        min_margin = float(search_cfg.get("min_margin", 0.05) or 0.05)
+        high_confidence = float(
+            search_cfg.get("high_confidence", 0.95) or 0.95
+        )
         detected = str(recognition.get("shape_id") or "Unknown")
         confidence = float(recognition.get("confidence") or -1.0)
-        return detected == shape_id and confidence >= min_confidence
+        margin = float(recognition.get("margin") or 0.0)
+        if detected != shape_id or detected == "Unknown":
+            return False
+        if confidence >= high_confidence or recognition.get("high_confidence_accepted"):
+            return True
+        return confidence >= min_confidence and margin >= min_margin
 
     def _wake_gamepad(self) -> None:
         """Send a disposable stick tap so the game binds the virtual gamepad input."""
@@ -485,7 +523,7 @@ class GamepadAssemblyController:
 
         self._wake_gamepad()
         self._wait_after_inventory_move()
-        recognition = self._recognize_selected_drive_shape(shape_id, quality=quality)
+        recognition = self._recognize_selected_drive_shape(quality=quality)
         logger.info(
             f"{self._format_selected_slot_log(recognition)} | "
             f"triangle_conf={recognition.get('triangle_confidence')} "
@@ -499,6 +537,7 @@ class GamepadAssemblyController:
             return recognition
 
         for step in range(1, max_steps + 1):
+            self._check_stopped()
             if step % grid_columns == 0:
                 logger.info(f"  [库存搜索 {step}/{max_steps}] 下移一行")
                 self._tap_inventory_down()
@@ -507,7 +546,7 @@ class GamepadAssemblyController:
                 self._tap_inventory_right()
 
             self._wait_after_inventory_move()
-            recognition = self._recognize_selected_drive_shape(shape_id, quality=quality)
+            recognition = self._recognize_selected_drive_shape(quality=quality)
             logger.info(
                 f"  {self._format_selected_slot_log(recognition)} | "
                 f"triangle_conf={recognition.get('triangle_confidence')} "
@@ -542,6 +581,7 @@ class GamepadAssemblyController:
         end_time = time.perf_counter() + duration_seconds
         tick = 0
         while time.perf_counter() < end_time:
+            self._check_stopped()
             self._send_drag_input(stick_x, stick_y)
             time.sleep(self._stick_interval)
             tick += 1
@@ -618,6 +658,7 @@ class GamepadAssemblyController:
         results: list[AssemblyPieceResult] = []
         total = len(pieces)
         for index, (piece_id, start_r, start_c) in enumerate(pieces, 1):
+            self._check_stopped()
             logger.warning(
                 f"开始装配第 {index}/{total} 块: {piece_id} → ({start_r}, {start_c})"
             )
@@ -635,6 +676,20 @@ class GamepadAssemblyController:
                 logger.success(
                     f"第 {index}/{total} 块装配完成: {piece_id} → ({start_r}, {start_c})"
                 )
+            except AssemblyStoppedError:
+                self._abort_drag_hold()
+                logger.warning(f"第 {index}/{total} 块装配被用户中止: {piece_id}")
+                results.append(
+                    AssemblyPieceResult(
+                        piece_id=piece_id,
+                        start_r=start_r,
+                        start_c=start_c,
+                        applied_moves=[],
+                        success=False,
+                        error="用户中止装配",
+                    )
+                )
+                break
             except Exception as exc:
                 logger.error(
                     f"第 {index}/{total} 块装配失败: {piece_id} → ({start_r}, {start_c}) | {exc}"
@@ -820,6 +875,7 @@ class GamepadAssemblyController:
         worse_streak = 0
 
         for iteration in range(1, max_iterations + 1):
+            self._check_stopped()
             detection = self._detect_piece_position(
                 piece_id,
                 quality=quality,
@@ -942,6 +998,7 @@ class GamepadAssemblyController:
         applied_moves: list[StickMove] = []
         try:
             for index, move in enumerate(moves, 1):
+                self._check_stopped()
                 logger.info(
                     f"  [拖动 {index}/{len(moves)} | A 保持按住 | {move.label}] "
                     f"stick=({move.stick_x:.3f}, {move.stick_y:.3f}) "
@@ -965,7 +1022,9 @@ class GamepadAssemblyController:
                 self._correct_drag_position(piece_id, start_r, start_c, quality=quality)
             )
         finally:
-            if self._drag_active:
+            if self._stopped and self._drag_active:
+                self._abort_drag_hold()
+            elif self._drag_active:
                 self._finish_drag_hold()
 
         return applied_moves
@@ -1014,14 +1073,22 @@ def run_full_assembly_test(
 ) -> FullAssemblyResult:
     merged_calibration = dict(calibration or load_assembly_calibration())
     controller = GamepadAssemblyController(calibration=merged_calibration)
+    set_active_assembly_controller(controller)
     before_path = controller.capture_screenshot("assembly_full_before.png")
 
     logger.warning(
         f"完整装配测试将在 {delay_seconds:.1f} 秒后接管控制，共 {len(pieces)} 块驱动。"
     )
-    time.sleep(max(0.0, float(delay_seconds)))
+    try:
+        end_at = time.perf_counter() + max(0.0, float(delay_seconds))
+        while time.perf_counter() < end_at:
+            controller._check_stopped()
+            time.sleep(min(0.1, max(0.0, end_at - time.perf_counter())))
 
-    piece_results = controller.assemble_all_pieces(pieces, stop_on_error=stop_on_error)
+        piece_results = controller.assemble_all_pieces(pieces, stop_on_error=stop_on_error)
+    finally:
+        set_active_assembly_controller(None)
+
     after_path = controller.capture_screenshot("assembly_full_after.png")
     return FullAssemblyResult(
         blueprint_role=blueprint_role,

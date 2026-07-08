@@ -24,6 +24,7 @@
         "max_steps": 20,
         "grid_columns": 4,
         "min_confidence": 0.65,
+        "high_confidence": 0.95,
         "target_shape_min_confidence": 0.55,
         "min_margin": 0.05,
         "post_move_delay_seconds": 0.40,

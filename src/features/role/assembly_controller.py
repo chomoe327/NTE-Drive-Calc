@@ -9,12 +9,21 @@ from PySide6.QtWidgets import QMessageBox
 
 from src.app import runtime
 from src.app.workers import WorkerThread
+from src.features.settings.hotkeys import load_hotkey_config
+from src.scanner.assembly_hotkeys import (
+    start_assembly_stop_hotkey,
+    stop_assembly_stop_hotkey,
+)
+from src.scanner.gamepad_assembly import (
+    load_assembly_calibration,
+    request_assembly_stop,
+    run_full_assembly_test,
+)
 from src.scanner.assembly_planner import (
     ASSEMBLY_BLUEPRINT_ROLE,
     ASSEMBLY_UI_ROLE,
     plan_full_assembly,
 )
-from src.scanner.gamepad_assembly import load_assembly_calibration, run_full_assembly_test
 from src.scanner.window_control import (
     WindowControlError,
     activate_game_window,
@@ -62,6 +71,11 @@ def _format_piece_plan(plan) -> str:
     return "\n".join(lines)
 
 
+def _assembly_stop_hotkey(window) -> str:
+    hotkeys = load_hotkey_config(runtime.USER_CONFIG_DIR)
+    return str(hotkeys.get("stop") or "F12")
+
+
 def _start_assembly_test(self, _role_name: str | None = None):
     if not sys.platform.startswith("win"):
         QMessageBox.warning(self, "不支持", "自动装配测试仅支持 Windows 平台。")
@@ -76,6 +90,7 @@ def _start_assembly_test(self, _role_name: str | None = None):
         QMessageBox.critical(self, "无法读取配装图纸", str(exc))
         return
 
+    stop_hotkey = _assembly_stop_hotkey(self)
     piece_summary = _format_piece_plan(preview_plan)
     confirmed = QMessageBox.question(
         self,
@@ -91,8 +106,9 @@ def _start_assembly_test(self, _role_name: str | None = None):
             "  2. 中间 5×5 网格为空\n"
             "  3. 左侧库存焦点在第一个驱动\n"
             f"  4. 配装页已保存 {ASSEMBLY_BLUEPRINT_ROLE} 的统筹方案\n\n"
+            "形状识别使用金色/紫色库存小模板（_Inv.png / _Inv_Purple.png），多模板取最高分。\n"
             "若目标驱动块已被其他角色装备，程序会自动识别确认框并点击「确认」。\n"
-            "程序会先唤醒手柄，再通过形状识别搜索库存中的目标驱动。\n"
+            f"运行中按 {stop_hotkey} 可立即停止装配。\n"
             "点击确定后程序将最小化，并切换到「异环」窗口，3 秒后接管虚拟手柄。\n"
             "调试截图将保存到 accounts/default/test/ 目录。"
         ),
@@ -117,6 +133,7 @@ def _start_assembly_test(self, _role_name: str | None = None):
     target_hwnd = window_info.hwnd
     target_title = window_info.title
     self.showMinimized()
+    start_assembly_stop_hotkey(stop_hotkey, request_assembly_stop)
 
     def _run_test():
         plan = plan_full_assembly(
@@ -153,6 +170,7 @@ def _start_assembly_test(self, _role_name: str | None = None):
 
 
 def _on_assembly_test_done(self, result):
+    stop_assembly_stop_hotkey()
     self.showNormal()
     self.activateWindow()
     debug_lines = "\n".join(result.debug_screenshots) if result.debug_screenshots else "（无）"
@@ -164,7 +182,13 @@ def _on_assembly_test_done(self, result):
         )
     piece_summary = "\n".join(piece_lines) if piece_lines else "（无）"
     failed = result.failed_pieces
-    title = "自动装配测试完成" if not failed else "自动装配测试部分失败"
+    stopped = any((piece.error or "") == "用户中止装配" for piece in result.pieces)
+    if stopped:
+        title = "自动装配已中止"
+    elif not failed:
+        title = "自动装配测试完成"
+    else:
+        title = "自动装配测试部分失败"
     QMessageBox.information(
         self,
         title,
@@ -182,6 +206,7 @@ def _on_assembly_test_done(self, result):
 
 
 def _on_assembly_test_error(self, message: str):
+    stop_assembly_stop_hotkey()
     self.showNormal()
     self.activateWindow()
     if isinstance(message, str) and "ViGEmBus" in message:

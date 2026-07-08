@@ -770,6 +770,7 @@ class InventoryShapeRecognizerTests(unittest.TestCase):
         import numpy as np
 
         from src.features.inventory_import.equipment_classifier import (
+            match_inventory_slot_templates_execute_style,
             match_shape_template_variants_in_crop,
         )
         from src.scanner.shape_recognizer import GoldShapeRecognizer
@@ -781,15 +782,27 @@ class InventoryShapeRecognizerTests(unittest.TestCase):
         )
         template = recognizer.templates["H_2"]
         crop = cv2.cvtColor(template, cv2.COLOR_GRAY2BGR)
+        variants = recognizer.templates_for_shape_match(["Gold", "Purple"])
         result = match_shape_template_variants_in_crop(
             crop,
-            recognizer.templates_for_shape_match(["Gold", "Purple"]),
+            variants,
             min_confidence=0.55,
             min_margin=0.0,
         )
 
         self.assertEqual("H_2", result["shape_id"])
         self.assertGreaterEqual(result["confidence"], 0.55)
+
+        execute_result = match_inventory_slot_templates_execute_style(
+            crop,
+            variants,
+            min_confidence=0.55,
+            high_confidence=0.95,
+            min_margin=0.0,
+        )
+        self.assertEqual("H_2", execute_result["shape_id"])
+        self.assertGreaterEqual(execute_result["confidence"], 0.95)
+        self.assertTrue(execute_result["high_confidence_accepted"])
 
 
 class InventoryAssemblyShapeTests(unittest.TestCase):

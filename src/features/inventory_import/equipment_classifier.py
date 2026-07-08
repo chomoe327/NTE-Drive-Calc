@@ -24,6 +24,7 @@ def match_shape_templates_in_crop(
     templates: dict[str, np.ndarray],
     *,
     min_confidence: float = INVENTORY_SLOT_MIN_CONFIDENCE,
+    high_confidence: float = HIGH_CONFIDENCE_DRIVE_SHAPE,
     min_margin: float = INVENTORY_SLOT_MIN_MARGIN,
     scale_hint: tuple[int, int] | None = None,
 ) -> dict:
@@ -155,6 +156,7 @@ def match_shape_template_variants_in_crop(
     template_variants: dict[str, list[np.ndarray]],
     *,
     min_confidence: float = INVENTORY_SLOT_MIN_CONFIDENCE,
+    high_confidence: float = HIGH_CONFIDENCE_DRIVE_SHAPE,
     min_margin: float = INVENTORY_SLOT_MIN_MARGIN,
     scale_hint: tuple[int, int] | None = None,
 ) -> dict:
@@ -234,6 +236,75 @@ def match_shape_template_variants_in_crop(
         "margin": round(margin, 2),
         "match_top_left": (match_x, match_y),
         "match_size": (match_w, match_h),
+    }
+
+
+def match_inventory_slot_templates_execute_style(
+    crop_bgr: np.ndarray,
+    template_variants: dict[str, list[np.ndarray]],
+    *,
+    min_confidence: float = INVENTORY_SLOT_MIN_CONFIDENCE,
+    high_confidence: float = HIGH_CONFIDENCE_DRIVE_SHAPE,
+    min_margin: float = INVENTORY_SLOT_MIN_MARGIN,
+) -> dict:
+    """Match an inventory cell crop against all _Inv variants; highest score wins.
+
+    Uses the same resize-to-crop strategy as execute-page ``ShapeRecognizer``,
+    but competes across every Gold/Purple inventory template at once.
+    """
+    empty_result = {
+        "shape_id": "Unknown",
+        "confidence": -1.0,
+        "second_best_confidence": -1.0,
+        "margin": 0.0,
+        "high_confidence_accepted": False,
+        "match_top_left": None,
+        "match_size": None,
+    }
+    if crop_bgr is None or crop_bgr.size == 0 or not template_variants:
+        return dict(empty_result)
+
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if len(crop_bgr.shape) == 3 else crop_bgr
+    crop_h, crop_w = gray.shape[:2]
+    if crop_h < 8 or crop_w < 8:
+        return dict(empty_result)
+
+    scores: list[tuple[float, str]] = []
+    for shape_id, variants in template_variants.items():
+        for template in variants:
+            if template is None or template.size == 0:
+                continue
+            resized = cv2.resize(template, (crop_w, crop_h))
+            result = cv2.matchTemplate(gray, resized, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(result)
+            scores.append((float(max_val), shape_id))
+
+    if not scores:
+        return dict(empty_result)
+
+    scores.sort(reverse=True, key=lambda item: item[0])
+    best_score, best_shape = scores[0]
+    second_score = scores[1][0] if len(scores) > 1 else -1.0
+    margin = best_score - second_score if second_score >= 0 else best_score
+    accepted = best_score >= high_confidence or (
+        best_score >= min_confidence and margin >= min_margin
+    )
+    if not accepted and best_score < min_confidence:
+        return {
+            **empty_result,
+            "confidence": round(best_score, 2),
+            "second_best_confidence": round(second_score, 2),
+            "margin": round(margin, 2),
+        }
+
+    return {
+        "shape_id": best_shape,
+        "confidence": round(best_score, 2),
+        "second_best_confidence": round(second_score, 2),
+        "margin": round(margin, 2),
+        "high_confidence_accepted": best_score >= high_confidence,
+        "match_top_left": None,
+        "match_size": (crop_w, crop_h),
     }
 
 
@@ -574,6 +645,7 @@ def locate_shape_in_slot_crop(
     *,
     candidate_shape_ids: list[str] | None = None,
     min_confidence: float = INVENTORY_SLOT_MIN_CONFIDENCE,
+    high_confidence: float = HIGH_CONFIDENCE_DRIVE_SHAPE,
     min_margin: float = INVENTORY_SLOT_MIN_MARGIN,
 ) -> dict:
     if gold_templates and isinstance(next(iter(gold_templates.values())), list):
@@ -584,10 +656,11 @@ def locate_shape_in_slot_crop(
                 for shape_id in candidate_shape_ids
                 if shape_id in template_variants
             }
-        return match_shape_template_variants_in_crop(
+        return match_inventory_slot_templates_execute_style(
             slot_crop,
             template_variants,
             min_confidence=min_confidence,
+            high_confidence=high_confidence,
             min_margin=min_margin,
         )
 
@@ -618,6 +691,7 @@ def locate_selected_inventory_shape(
     base_width: int = 2560,
     base_height: int = 1440,
     min_confidence: float = INVENTORY_SLOT_MIN_CONFIDENCE,
+    high_confidence: float = HIGH_CONFIDENCE_DRIVE_SHAPE,
     min_margin: float = INVENTORY_SLOT_MIN_MARGIN,
     min_triangle_confidence: float = 0.80,
     triangle_size_2k: tuple[int, int] = DEFAULT_SELECTION_TRIANGLE_SIZE_2K,
@@ -663,6 +737,7 @@ def locate_selected_inventory_shape(
         gold_templates,
         slot_crop,
         min_confidence=min_confidence,
+        high_confidence=high_confidence,
         min_margin=min_margin,
     )
     result.update(selected)
