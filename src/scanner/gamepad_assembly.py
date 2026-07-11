@@ -297,11 +297,12 @@ class GamepadAssemblyController:
         self._click_point_2k(shape_point, label=f"形状 {shape_id}")
         self._sleep_cfg("after_click_shape_seconds", 0.25)
 
-        self._click_point_2k(modal_confirm, label="确认筛选")
-        self._sleep_cfg("after_confirm_modal_seconds", 0.40)
+        self._click_point_2k(modal_confirm, label="形状弹窗-确认筛选")
+        self._sleep_cfg("after_confirm_modal_seconds", 0.70)
 
-        self._click_point_2k(panel_confirm, label="筛选面板确认")
-        self._sleep_cfg("after_confirm_panel_seconds", 0.55)
+        # 形状弹窗关闭后仍停留在右侧筛选面板，必须再点一次「确认」才会生效并关闭面板。
+        self._click_point_2k(panel_confirm, label="筛选面板-确认")
+        self._sleep_cfg("after_confirm_panel_seconds", 0.60)
         self._capture_debug("after_inventory_filter")
         logger.success(f"已筛选形状 {shape_id}，准备抓取库存第一格。")
 

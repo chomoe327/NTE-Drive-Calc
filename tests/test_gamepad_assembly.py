@@ -49,7 +49,7 @@ class GamepadAssemblyTests(unittest.TestCase):
                 "shape_click_select_2k": [2068, 538],
                 "shape_modal_reset_2k": [990, 1215],
                 "shape_modal_confirm_2k": [1560, 1215],
-                "filter_panel_confirm_2k": [2285, 1322],
+                "filter_panel_confirm_2k": [2287, 1327],
                 "reset_before_select": True,
                 "after_open_filter_seconds": 0.0,
                 "after_open_shape_modal_seconds": 0.0,
@@ -205,7 +205,7 @@ class GamepadAssemblyTests(unittest.TestCase):
 
         self.assertEqual("shape_filter", first["method"])
         self.assertEqual("H_2", second["shape_id"])
-        # filter open + shape select + reset + shape + modal confirm + panel confirm
+        # filter + shape select + reset + shape + modal confirm + panel confirm
         self.assertEqual(6, controller._click_point_2k.call_count)
         controller._wake_gamepad.assert_called()
 
