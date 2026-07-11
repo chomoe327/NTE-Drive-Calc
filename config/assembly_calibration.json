@@ -22,21 +22,42 @@
         "right_stick_x": 1.0,
         "down_stick_y": -1.0
     },
+    "inventory_filter": {
+        "enabled": true,
+        "filter_button_2k": [132, 1338],
+        "shape_click_select_2k": [2068, 538],
+        "shape_modal_reset_2k": [990, 1215],
+        "shape_modal_confirm_2k": [1560, 1215],
+        "filter_panel_confirm_2k": [2285, 1322],
+        "reset_before_select": true,
+        "after_open_filter_seconds": 0.45,
+        "after_open_shape_modal_seconds": 0.45,
+        "after_reset_seconds": 0.25,
+        "after_click_shape_seconds": 0.25,
+        "after_confirm_modal_seconds": 0.40,
+        "after_confirm_panel_seconds": 0.55,
+        "click_move_settle_seconds": 0.05,
+        "click_hold_seconds": 0.02,
+        "shape_centers_2k": {
+            "H_2": [798, 498],
+            "V_2": [945, 498],
+            "H_3": [798, 752],
+            "V_3": [945, 752],
+            "L_3_BL": [1095, 752],
+            "L_3_TL": [1245, 752],
+            "L_3_TR": [1392, 752],
+            "L_3_BR": [1545, 752],
+            "H_4": [798, 1008],
+            "V_4": [945, 1008],
+            "Trap_4_H": [1095, 1008],
+            "Trap_4_V": [1248, 1008]
+        }
+    },
     "inventory_search": {
-        "max_steps": 20,
-        "grid_columns": 4,
-        "min_confidence": 0.55,
-        "high_confidence": 0.95,
-        "target_shape_min_confidence": 0.55,
-        "min_margin": 0.05,
-        "post_move_delay_seconds": 0.40,
-        "template_suffix": "_Inv.png",
-        "purple_template_suffix": "_Inv_Purple.png",
+        "template_suffix": "_Gold.png",
+        "purple_template_suffix": "_Purple.png",
         "match_qualities": ["Gold", "Purple"],
-        "default_quality": "Gold",
-        "selection_triangle_template": "inventory_selection_triangle.png",
-        "selection_triangle_size_2k": [70, 20],
-        "selection_min_triangle_confidence": 0.80
+        "default_quality": "Gold"
     },
     "inventory_grid": {
         "origin_2k": [53, 358],
@@ -91,13 +112,11 @@
     "grid_origin_c": 0,
     "equip_transfer_dialog": {
         "enabled": true,
-        "keywords": ["是否镶嵌于此处", "该装备已镶嵌", "已镶嵌在"],
+        "keywords": ["取消", "确认"],
         "detect_settle_seconds": 0.45,
         "crop_width_ratio": 0.72,
         "crop_height_ratio": 0.55,
-        "confirm_nav": [
-            {"stick_x": 1.0, "stick_y": 0.0}
-        ],
+        "confirm_nav": [],
         "nav_tap_seconds": 0.10,
         "nav_settle_seconds": 0.20,
         "confirm_a_hold_seconds": 0.08,
@@ -107,6 +126,7 @@
     "debug_capture": {
         "enabled": true,
         "after_gamepad_wake": true,
+        "after_inventory_filter": true,
         "after_inventory_search": true,
         "after_pickup": true,
         "after_each_move": true,

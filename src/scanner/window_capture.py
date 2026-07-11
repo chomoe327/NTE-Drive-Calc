@@ -136,6 +136,27 @@ def scale_region(
     )
 
 
+def scale_point(
+    point: tuple[int, int] | list[int],
+    target_width: int,
+    target_height: int,
+    base_size: tuple[int, int],
+    preserve_aspect: bool = True,
+    content_rect: tuple[int, int, int, int] | None = None,
+) -> tuple[int, int]:
+    """Scale a 2K content-space point into the current window/client pixel space."""
+    x, y = int(point[0]), int(point[1])
+    x1, y1, _x2, _y2 = scale_region(
+        (x, y, x, y),
+        target_width,
+        target_height,
+        base_size,
+        preserve_aspect=preserve_aspect,
+        content_rect=content_rect,
+    )
+    return x1, y1
+
+
 def fit_content_rect(target_width: int, target_height: int, base_size: tuple[int, int]) -> tuple[int, int, int, int]:
     """Fit the base game aspect ratio inside a window, preserving letterbox offsets."""
     base_w, base_h = base_size

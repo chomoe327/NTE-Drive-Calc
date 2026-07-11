@@ -14,11 +14,6 @@ import mss.tools
 import numpy as np
 
 from src.app import runtime
-from src.features.inventory_import.equipment_classifier import (
-    build_inventory_grid_layout,
-    load_inventory_selection_triangle,
-    locate_selected_inventory_shape,
-)
 from src.scanner.assembly_dialog import detect_equip_transfer_dialog
 from src.scanner.assembly_vision import (
     assembly_board_region,
@@ -34,8 +29,13 @@ from src.scanner.assembly_vision import (
 )
 from src.scanner.config import ScannerConfig
 from src.scanner.gamepad_controller import ViGEmDriverNotReadyError, _format_vigem_error
+from src.scanner.mouse_input import click_screen_absolute
 from src.scanner.shape_recognizer import GoldShapeRecognizer
-from src.scanner.window_capture import capture_foreground_window, get_foreground_client_rect
+from src.scanner.window_capture import (
+    capture_foreground_window,
+    get_foreground_client_rect,
+    scale_point,
+)
 from src.utils.logger import logger
 
 
@@ -105,7 +105,7 @@ def assembly_test_dir() -> Path:
 
 
 class InventoryDriveNotFoundError(RuntimeError):
-    """Raised when shape-based inventory search cannot find the target drive."""
+    """Raised when shape-filter inventory selection cannot prepare the target drive."""
 
 
 class AssemblyStoppedError(RuntimeError):
@@ -139,8 +139,8 @@ class GamepadAssemblyController:
         self._debug_screenshots: list[str] = []
         self._debug_counter = 0
         self._shape_recognizer: GoldShapeRecognizer | None = None
-        self._selection_triangle_template = None
         self._ocr_engine = None
+        self._filtered_shape_id: str | None = None
         logger.info("正在连接虚拟 Xbox 360 手柄（装配测试）...")
         try:
             import vgamepad as vg
@@ -201,152 +201,116 @@ class GamepadAssemblyController:
         self.gamepad.left_joystick_float(x_value_float=0.0, y_value_float=0.0)
         self.gamepad.update()
 
-    def _inventory_nav_cfg(self) -> dict:
-        return self.calibration.get("inventory_nav", {}) or {}
+    def _inventory_filter_cfg(self) -> dict:
+        return self.calibration.get("inventory_filter", {}) or {}
 
     def _inventory_search_cfg(self) -> dict:
         return self.calibration.get("inventory_search", {}) or {}
 
-    def _inventory_grid_cfg(self) -> dict:
-        return self.calibration.get("inventory_grid", {}) or {}
-
-    def _get_selection_triangle_template(self):
-        if self._selection_triangle_template is None:
-            search_cfg = self._inventory_search_cfg()
-            template_name = str(
-                search_cfg.get("selection_triangle_template", "inventory_selection_triangle.png")
-                or "inventory_selection_triangle.png"
-            )
-            template_dir = runtime.TEMPLATE_DIR or runtime.CONFIG_DIR / "templates"
-            template_path = Path(template_dir) / template_name
-            self._selection_triangle_template = load_inventory_selection_triangle(template_path)
-        return self._selection_triangle_template
-
-    def _inventory_content_rect(self, image: np.ndarray) -> tuple[int, int, int, int]:
-        image_h, image_w = image.shape[:2]
-        return ScannerConfig.get_content_rect(image_w, image_h)
-
-    def _inventory_grid_layout(self, image: np.ndarray) -> dict:
-        image_h, image_w = image.shape[:2]
-        base_width = int(self.calibration.get("base_width", 2560) or 2560)
-        base_height = int(self.calibration.get("base_height", 1440) or 1440)
-        return build_inventory_grid_layout(
-            image_w,
-            image_h,
-            self._inventory_grid_cfg(),
-            base_width=base_width,
-            base_height=base_height,
-            content_rect=self._inventory_content_rect(image),
+    def _base_size(self) -> tuple[int, int]:
+        return (
+            int(self.calibration.get("base_width", 2560) or 2560),
+            int(self.calibration.get("base_height", 1440) or 1440),
         )
 
-    def _wait_after_inventory_move(self) -> None:
-        search_cfg = self._inventory_search_cfg()
-        delay = float(search_cfg.get("post_move_delay_seconds", 0.40) or 0.40)
+    def _point_2k_to_client(self, point_2k: list[int] | tuple[int, int]) -> tuple[int, int]:
+        rect = get_foreground_client_rect()
+        content_rect = ScannerConfig.get_content_rect(rect.width, rect.height)
+        return scale_point(
+            (int(point_2k[0]), int(point_2k[1])),
+            rect.width,
+            rect.height,
+            self._base_size(),
+            content_rect=content_rect,
+        )
+
+    def _click_point_2k(self, point_2k: list[int] | tuple[int, int], *, label: str = "") -> None:
+        self._check_stopped()
+        filter_cfg = self._inventory_filter_cfg()
+        move_settle = float(filter_cfg.get("click_move_settle_seconds", 0.05) or 0.05)
+        click_hold = float(filter_cfg.get("click_hold_seconds", 0.02) or 0.02)
+        client_x, client_y = self._point_2k_to_client(point_2k)
+        rect = get_foreground_client_rect()
+        screen_x = rect.left + client_x
+        screen_y = rect.top + client_y
+        suffix = f" ({label})" if label else ""
+        logger.info(
+            f"点击 UI{suffix}: 2k=({int(point_2k[0])}, {int(point_2k[1])}) "
+            f"client=({client_x}, {client_y}) screen=({screen_x}, {screen_y})"
+        )
+        click_screen_absolute(
+            screen_x,
+            screen_y,
+            move_settle_seconds=move_settle,
+            click_hold_seconds=click_hold,
+        )
+
+    def _sleep_cfg(self, key: str, default: float) -> None:
+        filter_cfg = self._inventory_filter_cfg()
+        delay = float(filter_cfg.get(key, default) or default)
         if delay > 0:
             time.sleep(delay)
 
-    def _format_selected_slot_log(self, recognition: dict) -> str:
-        slot_index = recognition.get("slot_index")
-        slot_row = recognition.get("slot_row")
-        slot_col = recognition.get("slot_col")
-        if slot_index is None or slot_row is None or slot_col is None:
-            return "当前未能定位选中格子"
-        return f"当前选中第 {slot_index} 格 (行{slot_row}, 列{slot_col})"
-
-    def _tap_left_stick(
-        self,
-        stick_x: float,
-        stick_y: float,
-        *,
-        vertical: bool = False,
-    ) -> None:
-        nav = self._inventory_nav_cfg()
-        if vertical:
-            tap_seconds = float(nav.get("row_tap_seconds", 0.15) or 0.15)
-            settle_seconds = float(nav.get("row_settle_seconds", 0.30) or 0.30)
-        else:
-            tap_seconds = float(nav.get("tap_seconds", 0.10) or 0.10)
-            settle_seconds = float(nav.get("settle_seconds", 0.25) or 0.25)
-        self.gamepad.left_joystick_float(x_value_float=float(stick_x), y_value_float=float(stick_y))
-        self.gamepad.update()
-        time.sleep(tap_seconds)
-        self._reset_stick()
-        time.sleep(settle_seconds)
-
-    def _tap_inventory_right(self) -> None:
-        nav = self._inventory_nav_cfg()
-        right_stick_x = float(nav.get("right_stick_x", 1.0) or 1.0)
-        self._tap_left_stick(right_stick_x, 0.0, vertical=False)
-
-    def _tap_inventory_down(self) -> None:
-        nav = self._inventory_nav_cfg()
-        down_stick_y = float(nav.get("down_stick_y", -1.0) or -1.0)
-        self._tap_left_stick(0.0, down_stick_y, vertical=True)
-
-    def _inventory_slot_position(self, recognition: dict) -> tuple[int | None, int | None]:
-        row = recognition.get("slot_row")
-        col = recognition.get("slot_col")
-        if row is None or col is None:
-            return None, None
-        return int(row), int(col)
-
-    def _advance_inventory_selection(
-        self,
-        *,
-        row: int | None,
-        col: int | None,
-        grid_columns: int,
-        grid_rows: int,
-        step: int,
-        max_steps: int,
-    ) -> str:
-        if row is None or col is None:
-            logger.warning(
-                f"  [库存搜索 {step}/{max_steps}] 未能定位当前格，尝试右移一格"
+    def _shape_center_2k(self, shape_id: str) -> tuple[int, int]:
+        filter_cfg = self._inventory_filter_cfg()
+        centers = filter_cfg.get("shape_centers_2k") or {}
+        point = centers.get(shape_id)
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            raise InventoryDriveNotFoundError(
+                f"装配标定缺少形状 {shape_id} 的筛选坐标（inventory_filter.shape_centers_2k）。"
             )
-            self._tap_inventory_right()
-            return "right"
+        return int(point[0]), int(point[1])
 
-        if col < grid_columns - 1:
-            logger.info(
-                f"  [库存搜索 {step}/{max_steps}] 右移一格 "
-                f"(当前 行{row} 列{col} → 目标列{col + 1})"
-            )
-            self._tap_inventory_right()
-            return "right"
+    def _apply_shape_filter(self, shape_id: str) -> None:
+        filter_cfg = self._inventory_filter_cfg()
+        if not filter_cfg.get("enabled", True):
+            raise InventoryDriveNotFoundError("inventory_filter.enabled=false，无法通过筛选选择形状。")
 
-        if row < grid_rows - 1:
-            logger.info(
-                f"  [库存搜索 {step}/{max_steps}] 下移一行 "
-                f"(当前 行{row} 列{col} → 目标行{row + 1})"
-            )
-            self._tap_inventory_down()
-            return "down"
+        filter_button = filter_cfg.get("filter_button_2k")
+        shape_select = filter_cfg.get("shape_click_select_2k")
+        modal_reset = filter_cfg.get("shape_modal_reset_2k")
+        modal_confirm = filter_cfg.get("shape_modal_confirm_2k")
+        panel_confirm = filter_cfg.get("filter_panel_confirm_2k")
+        for name, point in (
+            ("filter_button_2k", filter_button),
+            ("shape_click_select_2k", shape_select),
+            ("shape_modal_confirm_2k", modal_confirm),
+            ("filter_panel_confirm_2k", panel_confirm),
+        ):
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                raise InventoryDriveNotFoundError(f"装配标定缺少有效坐标: inventory_filter.{name}")
 
-        raise InventoryDriveNotFoundError(
-            f"已遍历库存网格末尾（行{row} 列{col}），仍未找到目标驱动。"
-        )
+        shape_point = self._shape_center_2k(shape_id)
+        logger.warning(f"通过形状筛选定位库存驱动: {shape_id}")
 
-    def _log_inventory_move_anomaly(
-        self,
-        move: str,
-        prev_row: int | None,
-        prev_col: int | None,
-        new_row: int | None,
-        new_col: int | None,
-    ) -> None:
-        if prev_row is None or prev_col is None or new_row is None or new_col is None:
+        self._click_point_2k(filter_button, label="筛选按钮")
+        self._sleep_cfg("after_open_filter_seconds", 0.45)
+
+        self._click_point_2k(shape_select, label="外形-点击选择")
+        self._sleep_cfg("after_open_shape_modal_seconds", 0.45)
+
+        if filter_cfg.get("reset_before_select", True):
+            if isinstance(modal_reset, (list, tuple)) and len(modal_reset) == 2:
+                self._click_point_2k(modal_reset, label="重置筛选")
+                self._sleep_cfg("after_reset_seconds", 0.25)
+
+        self._click_point_2k(shape_point, label=f"形状 {shape_id}")
+        self._sleep_cfg("after_click_shape_seconds", 0.25)
+
+        self._click_point_2k(modal_confirm, label="确认筛选")
+        self._sleep_cfg("after_confirm_modal_seconds", 0.40)
+
+        self._click_point_2k(panel_confirm, label="筛选面板确认")
+        self._sleep_cfg("after_confirm_panel_seconds", 0.55)
+        self._capture_debug("after_inventory_filter")
+        logger.success(f"已筛选形状 {shape_id}，准备抓取库存第一格。")
+
+    def _ensure_shape_filter(self, shape_id: str) -> None:
+        if self._filtered_shape_id == shape_id:
+            logger.info(f"当前筛选已是 {shape_id}，跳过重复筛选。")
             return
-        if move == "right" and (new_row != prev_row or new_col != prev_col + 1):
-            logger.warning(
-                f"右移结果异常: ({prev_row}, {prev_col}) → ({new_row}, {new_col})，"
-                "将以视觉定位为准继续搜索。"
-            )
-        elif move == "down" and (new_row != prev_row + 1 or new_col != 0):
-            logger.warning(
-                f"下移结果异常: ({prev_row}, {prev_col}) → ({new_row}, {new_col})，"
-                "将以视觉定位为准继续搜索。"
-            )
+        self._apply_shape_filter(shape_id)
+        self._filtered_shape_id = shape_id
 
     def _position_correction_cfg(self) -> dict:
         return self.calibration.get("position_correction", {}) or {}
@@ -406,25 +370,26 @@ class GamepadAssemblyController:
         if not self._detect_equip_transfer_dialog():
             return False
 
-        logger.warning("检测到装备转移确认框，准备点击「确认」。")
+        logger.warning("检测到装备转移确认框（取消+确认），直接按 A 确认。")
         self._capture_debug("equip_transfer_dialog")
 
-        nav_moves = dialog_cfg.get("confirm_nav") or [{"stick_x": 1.0, "stick_y": 0.0}]
-        tap_seconds = float(dialog_cfg.get("nav_tap_seconds", 0.10) or 0.10)
-        nav_settle_seconds = float(dialog_cfg.get("nav_settle_seconds", 0.20) or 0.20)
-        for index, item in enumerate(nav_moves, 1):
-            if not isinstance(item, dict):
-                continue
-            stick_x = float(item.get("stick_x", 0.0) or 0.0)
-            stick_y = float(item.get("stick_y", 0.0) or 0.0)
-            logger.info(
-                f"  [确认框导航 {index}/{len(nav_moves)}] stick=({stick_x:.3f}, {stick_y:.3f})"
-            )
-            self.gamepad.left_joystick_float(x_value_float=stick_x, y_value_float=stick_y)
-            self.gamepad.update()
-            time.sleep(tap_seconds)
-            self._reset_stick()
-            time.sleep(nav_settle_seconds)
+        nav_moves = dialog_cfg.get("confirm_nav") or []
+        if isinstance(nav_moves, list) and nav_moves:
+            tap_seconds = float(dialog_cfg.get("nav_tap_seconds", 0.10) or 0.10)
+            nav_settle_seconds = float(dialog_cfg.get("nav_settle_seconds", 0.20) or 0.20)
+            for index, item in enumerate(nav_moves, 1):
+                if not isinstance(item, dict):
+                    continue
+                stick_x = float(item.get("stick_x", 0.0) or 0.0)
+                stick_y = float(item.get("stick_y", 0.0) or 0.0)
+                logger.info(
+                    f"  [确认框导航 {index}/{len(nav_moves)}] stick=({stick_x:.3f}, {stick_y:.3f})"
+                )
+                self.gamepad.left_joystick_float(x_value_float=stick_x, y_value_float=stick_y)
+                self.gamepad.update()
+                time.sleep(tap_seconds)
+                self._reset_stick()
+                time.sleep(nav_settle_seconds)
 
         self._press_a_tap()
         post_confirm_seconds = float(dialog_cfg.get("post_confirm_seconds", 0.50) or 0.50)
@@ -465,12 +430,6 @@ class GamepadAssemblyController:
             return [str(item) for item in configured if str(item).strip()]
         return ["Gold", "Purple"]
 
-    def _inventory_templates_for_quality(self, quality: str | None = None) -> dict:
-        search_cfg = self._inventory_search_cfg()
-        default_quality = str(search_cfg.get("default_quality", "Gold") or "Gold")
-        resolved_quality = quality or default_quality
-        return self._get_shape_recognizer().templates_for_quality(resolved_quality)
-
     def _inventory_template_variants_for_shape_match(
         self,
         quality: str | None = None,
@@ -487,82 +446,6 @@ class GamepadAssemblyController:
         if image.ndim == 3 and image.shape[2] == 3:
             return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
         return image
-
-    def _inventory_panel_region(self) -> tuple[int, int, int, int]:
-        rect = get_foreground_client_rect()
-        profiles = ScannerConfig.get_region_profiles(rect.width, rect.height)
-        _, regions = profiles[0]
-        return regions["inventory_panel"]
-
-    def _recognize_selected_drive_shape(
-        self,
-        *,
-        quality: str | None = None,
-    ) -> dict:
-        image = self._capture_foreground_bgr()
-        search_cfg = self._inventory_search_cfg()
-        min_margin = float(search_cfg.get("min_margin", 0.05) or 0.05)
-        min_confidence = float(search_cfg.get("min_confidence", 0.65) or 0.65)
-        high_confidence = float(
-            search_cfg.get("high_confidence", 0.95) or 0.95
-        )
-        min_triangle_confidence = float(
-            search_cfg.get("selection_min_triangle_confidence", 0.80) or 0.80
-        )
-        triangle_size_cfg = search_cfg.get("selection_triangle_size_2k") or [70, 20]
-        triangle_size_2k = (int(triangle_size_cfg[0]), int(triangle_size_cfg[1]))
-        base_width = int(self.calibration.get("base_width", 2560) or 2560)
-        base_height = int(self.calibration.get("base_height", 1440) or 1440)
-        panel_region = self._inventory_panel_region()
-        grid_layout = self._inventory_grid_layout(image)
-        content_rect = self._inventory_content_rect(image)
-        triangle_template = self._get_selection_triangle_template()
-        templates = self._inventory_template_variants_for_shape_match(quality)
-        result = locate_selected_inventory_shape(
-            templates,
-            image,
-            panel_region,
-            grid_layout=grid_layout,
-            triangle_template=triangle_template,
-            min_confidence=min_confidence,
-            high_confidence=high_confidence,
-            min_margin=min_margin,
-            min_triangle_confidence=min_triangle_confidence,
-            triangle_size_2k=triangle_size_2k,
-            base_width=base_width,
-            base_height=base_height,
-            content_rect=content_rect,
-        )
-        if result.get("selection_box"):
-            x1, y1, x2, y2 = result["selection_box"]
-            triangle_top_left = result.get("triangle_top_left")
-            logger.debug(
-                f"库存选中框: ({x1}, {y1})-({x2}, {y2}) "
-                f"triangle={triangle_top_left} "
-                f"triangle_conf={result.get('triangle_confidence')} "
-                f"shape_margin={result.get('margin')} "
-                f"second={result.get('second_best_confidence')} "
-                f"high_conf={result.get('high_confidence_accepted')}"
-            )
-        return result
-
-    def _selection_matches_target(self, shape_id: str, recognition: dict) -> bool:
-        search_cfg = self._inventory_search_cfg()
-        min_confidence = float(
-            search_cfg.get("target_shape_min_confidence", 0.55) or 0.55
-        )
-        min_margin = float(search_cfg.get("min_margin", 0.05) or 0.05)
-        high_confidence = float(
-            search_cfg.get("high_confidence", 0.95) or 0.95
-        )
-        detected = str(recognition.get("shape_id") or "Unknown")
-        confidence = float(recognition.get("confidence") or -1.0)
-        margin = float(recognition.get("margin") or 0.0)
-        if detected != shape_id or detected == "Unknown":
-            return False
-        if confidence >= high_confidence or recognition.get("high_confidence_accepted"):
-            return True
-        return confidence >= min_confidence and margin >= min_margin
 
     def _wake_gamepad(self) -> None:
         """Send a disposable stick tap so the game binds the virtual gamepad input."""
@@ -591,58 +474,17 @@ class GamepadAssemblyController:
         *,
         quality: str | None = None,
     ) -> dict:
-        """Search the inventory by recognizing the currently selected drive shape."""
-        search_cfg = self._inventory_search_cfg()
-        max_steps = max(1, int(search_cfg.get("max_steps", 20) or 20))
-        grid_columns = max(1, int(search_cfg.get("grid_columns", 4) or 4))
-        grid_rows = max(1, int(self._inventory_grid_cfg().get("grid_rows", 5) or 5))
-
+        """Filter inventory to the target shape, then focus the first matching slot."""
+        del quality  # board correction still uses quality; inventory pick is shape-only
+        self._ensure_shape_filter(shape_id)
         self._wake_gamepad()
-        self._wait_after_inventory_move()
-        recognition = self._recognize_selected_drive_shape(quality=quality)
-        logger.info(
-            f"{self._format_selected_slot_log(recognition)} | "
-            f"triangle_conf={recognition.get('triangle_confidence')} "
-            f"shape={recognition.get('shape_id')} "
-            f"confidence={recognition.get('confidence')} "
-            f"margin={recognition.get('margin')}"
-        )
-        if self._selection_matches_target(shape_id, recognition):
-            logger.info(f"当前选中驱动已是目标形状 {shape_id}，无需继续搜索。")
-            self._capture_debug("after_inventory_search")
-            return recognition
-
-        for step in range(1, max_steps + 1):
-            self._check_stopped()
-            prev_row, prev_col = self._inventory_slot_position(recognition)
-            move = self._advance_inventory_selection(
-                row=prev_row,
-                col=prev_col,
-                grid_columns=grid_columns,
-                grid_rows=grid_rows,
-                step=step,
-                max_steps=max_steps,
-            )
-
-            self._wait_after_inventory_move()
-            recognition = self._recognize_selected_drive_shape(quality=quality)
-            new_row, new_col = self._inventory_slot_position(recognition)
-            self._log_inventory_move_anomaly(move, prev_row, prev_col, new_row, new_col)
-            logger.info(
-                f"  {self._format_selected_slot_log(recognition)} | "
-                f"triangle_conf={recognition.get('triangle_confidence')} "
-                f"shape={recognition.get('shape_id')} "
-                f"confidence={recognition.get('confidence')} "
-                f"margin={recognition.get('margin')}"
-            )
-            if self._selection_matches_target(shape_id, recognition):
-                logger.success(f"已找到目标形状 {shape_id}。")
-                self._capture_debug("after_inventory_search")
-                return recognition
-
-        raise InventoryDriveNotFoundError(
-            f"在库存中未找到形状为 {shape_id} 的驱动块（已搜索 {max_steps} 步）。"
-        )
+        self._capture_debug("after_inventory_search")
+        return {
+            "shape_id": shape_id,
+            "method": "shape_filter",
+            "confidence": 1.0,
+            "margin": 1.0,
+        }
 
     def _send_drag_input(self, stick_x: float, stick_y: float) -> None:
         if not self._drag_active:

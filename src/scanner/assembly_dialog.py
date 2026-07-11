@@ -10,10 +10,9 @@ import numpy as np
 from src.utils.logger import logger
 
 
-DEFAULT_EQUIP_TRANSFER_KEYWORDS = (
-    "是否镶嵌于此处",
-    "该装备已镶嵌",
-    "已镶嵌在",
+DEFAULT_EQUIP_TRANSFER_REQUIRED_TOKENS = (
+    "取消",
+    "确认",
 )
 
 
@@ -22,14 +21,15 @@ def _normalize_dialog_text(text: str) -> str:
 
 
 def dialog_text_matches(texts: Iterable[str], keywords: Iterable[str]) -> bool:
+    """Return True when every keyword appears in the joined OCR text."""
     combined = _normalize_dialog_text("".join(texts))
     if not combined:
         return False
     for keyword in keywords:
         normalized_keyword = _normalize_dialog_text(keyword)
-        if normalized_keyword and normalized_keyword in combined:
-            return True
-    return False
+        if not normalized_keyword or normalized_keyword not in combined:
+            return False
+    return True
 
 
 def center_dialog_crop(image: np.ndarray, width_ratio: float = 0.72, height_ratio: float = 0.55) -> np.ndarray:
@@ -52,10 +52,11 @@ def detect_equip_transfer_dialog(
     width_ratio: float = 0.72,
     height_ratio: float = 0.55,
 ) -> bool:
-    """Return True when the screenshot center contains equip-transfer dialog text."""
+    """Return True when OCR sees both cancel and confirm labels on the dialog."""
     crop = center_dialog_crop(image, width_ratio=width_ratio, height_ratio=height_ratio)
     texts = ocr_engine.extract_text(crop)
-    matched = dialog_text_matches(texts, keywords or DEFAULT_EQUIP_TRANSFER_KEYWORDS)
+    required = keywords or DEFAULT_EQUIP_TRANSFER_REQUIRED_TOKENS
+    matched = dialog_text_matches(texts, required)
     if matched:
         logger.info(f"检测到装备转移确认框 OCR: {texts}")
     return matched

@@ -409,11 +409,12 @@ def _grid_triangle_search_region(
     rows = int(grid_layout["grid_rows"])
 
     pad_x = max(4, int(cell_width * 0.15))
+    pad_right = max(pad_x, int(cell_width * 0.40))
     pad_top = max(4, int(cell_height * 0.35))
     pad_bottom = max(4, int(cell_height * 0.10))
     x1 = max(0, origin_x - pad_x)
     y1 = max(0, origin_y - pad_top)
-    x2 = min(image_width, origin_x + columns * cell_width + pad_x)
+    x2 = min(image_width, origin_x + columns * cell_width + pad_right)
     y2 = min(image_height, origin_y + rows * cell_height + pad_bottom)
 
     px1, py1, px2, py2 = panel_region
@@ -558,13 +559,28 @@ def _match_selection_triangle(
     }
 
 
+def _row_index_from_triangle_bottom(bottom_y: float, grid_layout: dict) -> int:
+    """Pick the grid row whose cell top is closest to the triangle bottom edge."""
+    origin_y = float(grid_layout["origin_y"])
+    cell_height = float(grid_layout["cell_height"])
+    rows = int(grid_layout["grid_rows"])
+    best_row = 0
+    best_dist = float("inf")
+    for candidate in range(rows):
+        expected_top = origin_y + candidate * cell_height
+        dist = abs(bottom_y - expected_top)
+        if dist < best_dist:
+            best_dist = dist
+            best_row = candidate
+    return best_row
+
+
 def _cell_index_from_triangle(
     triangle_match: dict,
     grid_layout: dict,
     selection_box: tuple[int, int, int, int] | None = None,
 ) -> tuple[int, int]:
     origin_x = float(grid_layout["origin_x"])
-    origin_y = float(grid_layout["origin_y"])
     cell_width = float(grid_layout["cell_width"])
     cell_height = float(grid_layout["cell_height"])
     columns = int(grid_layout["grid_columns"])
@@ -573,7 +589,7 @@ def _cell_index_from_triangle(
     center_x = float(triangle_match["center_x"])
     bottom_y = float(triangle_match["bottom_y"])
     col = int(round((center_x - origin_x - cell_width / 2) / cell_width))
-    row = int(round((bottom_y - origin_y - cell_height * 0.05) / cell_height))
+    row = _row_index_from_triangle_bottom(bottom_y, grid_layout)
     col = max(0, min(columns - 1, col))
     row = max(0, min(rows - 1, row))
     return row, col
@@ -587,7 +603,7 @@ def _triangle_aligns_with_grid_row(
     origin_y = float(grid_layout["origin_y"])
     cell_height = float(grid_layout["cell_height"])
     expected_top = origin_y + row * cell_height
-    return abs(float(triangle_match["bottom_y"]) - expected_top) <= cell_height * 0.35
+    return abs(float(triangle_match["bottom_y"]) - expected_top) <= cell_height * 0.45
 
 
 def find_selected_inventory_cell(

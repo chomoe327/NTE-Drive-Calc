@@ -78,10 +78,14 @@ class GoldShapeRecognizer:
             f"{quality}={len(templates)}"
             for quality, templates in sorted(self.templates_by_quality.items())
         )
+        variant_total = len(self.templates) + sum(
+            len(templates) for templates in self.templates_by_quality.values()
+        )
         extra = f"；品质模板 {quality_counts}" if quality_counts else ""
         logger.info(
             f"库存形状识别器就绪，已加载 {len(self.templates)} 个默认模板"
-            f"（后缀 {self.template_suffix}）{extra}。"
+            f"（后缀 {self.template_suffix}）{extra}；"
+            f"形状匹配时最多同时使用 {variant_total} 个模板变体。"
         )
 
     def templates_for_quality(self, quality: str | None = None) -> dict[str, np.ndarray]:
