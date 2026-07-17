@@ -647,6 +647,16 @@ def _is_role_blueprint_assembly_action(action: dict[str, Any]) -> bool:
     return action.get("name") in {"assemble_current_role_from_blueprint", "run_drive_assembly_for_role"}
 
 
+def _drive_block_duplicate_log(action: dict[str, Any]) -> str:
+    if "is_duplicate_drive" not in action:
+        return "重复驱动=未知"
+    parts = [f"重复驱动={bool(action.get('is_duplicate_drive'))}"]
+    duplicate_index = action.get("duplicate_index")
+    if duplicate_index:
+        parts.append(f"副本序号={duplicate_index}")
+    return " | ".join(parts)
+
+
 def _action_diagnostic(action: dict[str, Any]) -> str:
     """Return concise, useful context for an action that could not run."""
 
@@ -706,7 +716,8 @@ def _execute_one_action(
         end = _point(action["to"])
         duration_ms = int(action.get("duration_ms") or DEFAULT_DRAG_DURATION_MS)
         logger.info(
-            f"Drive block {action.get('block_id')} forced drag started: "
+            f"Drive block {action.get('block_id')} forced drag started | "
+            f"{_drive_block_duplicate_log(action)} | "
             f"{start} -> {end} ({duration_ms}ms)"
         )
         # This first placement attempt intentionally runs even when the list is
@@ -823,7 +834,8 @@ def _retry_missing_drive_block(
     retry_end = _point(retry_to)
     retry_duration = int(action.get("retry_duration_ms") or DEFAULT_DRAG_DURATION_MS)
     logger.info(
-        f"Drive block {action.get('block_id')} retry drag started: "
+        f"Drive block {action.get('block_id')} retry drag started | "
+        f"{_drive_block_duplicate_log(action)} | "
         f"{retry_start} -> {retry_end} ({retry_duration}ms)"
     )
     backend.drag(retry_start, retry_end, retry_duration)

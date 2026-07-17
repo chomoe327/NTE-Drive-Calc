@@ -783,6 +783,8 @@ def map_drive_block_installation(
         {
             "name": "force_drag_first_drive_to_block",
             "block_id": block.get("block_id"),
+            "is_duplicate_drive": is_duplicate,
+            "duplicate_index": block.get("duplicate_index"),
             "from": result["first_drive"],
             "to": result["target_position"],
             "duration_ms": duration_ms,
@@ -803,6 +805,8 @@ def map_drive_block_installation(
         {
             "name": "verify_drive_block_installed",
             "block_id": block.get("block_id"),
+            "is_duplicate_drive": is_duplicate,
+            "duplicate_index": block.get("duplicate_index"),
             "target_position": result["target_position"],
             "retry_from": result["first_drive"],
             "retry_to": result["target_position"],
