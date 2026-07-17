@@ -109,7 +109,7 @@ DEFAULT_DRIVE_EQUIP_FIRST_RESULT = {
 DEFAULT_DRIVE_FILTER_RESULT_GRID = {
     "origin": DEFAULT_DRIVE_EQUIP_FIRST_RESULT["first_drive"],
     "columns": 4,
-    "column_step": (221.0, 0.0),
+    "column_step": (176.0, 0.0),
     "row_step": (0.0, 159.0),
 }
 DEFAULT_DRIVE_SHAPE_DIALOG_CONTROLS = {
@@ -818,6 +818,7 @@ def map_drive_block_installation(
             "block_id": block.get("block_id"),
             "is_duplicate_drive": is_duplicate,
             "duplicate_index": block.get("duplicate_index"),
+            "filter_result_index": filter_result_index,
             "target_position": result["target_position"],
             "retry_from": result["first_drive"],
             "retry_to": result["target_position"],

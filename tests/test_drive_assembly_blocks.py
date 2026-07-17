@@ -1015,19 +1015,19 @@ class DriveAssemblyBlockTests(unittest.TestCase):
         drag = next(step for step in install["install_sequence"] if step["name"] == "force_drag_first_drive_to_block")
 
         self.assertEqual(2, install["filter_result_index"])
-        self.assertEqual((347, 430), install["first_drive"])
-        self.assertEqual((347, 430), drag["from"])
+        self.assertEqual((302, 430), install["first_drive"])
+        self.assertEqual((302, 430), drag["from"])
         self.assertEqual(2, drag["filter_result_index"])
 
     def test_drive_filter_result_positions_follow_four_column_grid(self):
         from src.features.drive_assembly.page_mapping import _drive_filter_result_position
 
         self.assertEqual((126, 430), _drive_filter_result_position(1))
-        self.assertEqual((347, 430), _drive_filter_result_position(2))
-        self.assertEqual((568, 430), _drive_filter_result_position(3))
-        self.assertEqual((789, 430), _drive_filter_result_position(4))
+        self.assertEqual((302, 430), _drive_filter_result_position(2))
+        self.assertEqual((478, 430), _drive_filter_result_position(3))
+        self.assertEqual((654, 430), _drive_filter_result_position(4))
         self.assertEqual((126, 589), _drive_filter_result_position(5))
-        self.assertEqual((789, 589), _drive_filter_result_position(8))
+        self.assertEqual((654, 589), _drive_filter_result_position(8))
 
     def test_maps_drive_block_installation_from_cells_when_pixel_position_missing(self):
         from src.features.drive_assembly.page_mapping import map_drive_block_installation
