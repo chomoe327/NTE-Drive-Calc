@@ -105,6 +105,13 @@ DEFAULT_DRIVE_EQUIP_FIRST_RESULT = {
     "confirm_filter": (2273.0, 1322.0),
     "first_drive": (126.0, 430.0),
 }
+# 配装页左侧筛选结果为 4 列网格；first_drive 为第 1 格中心，按步长推算其余格位。
+DEFAULT_DRIVE_FILTER_RESULT_GRID = {
+    "origin": DEFAULT_DRIVE_EQUIP_FIRST_RESULT["first_drive"],
+    "columns": 4,
+    "column_step": (221.0, 0.0),
+    "row_step": (0.0, 159.0),
+}
 DEFAULT_DRIVE_SHAPE_DIALOG_CONTROLS = {
     "confirm_filter": (1564.0, 1186.0),
 }
@@ -741,6 +748,7 @@ def map_drive_block_installation(
     set_selection = map_drive_set_selection(set_name, screen_size, content_rect) if set_name else None
     shape_selection = map_drive_shape_selection(drive_type, screen_size, content_rect)
     is_duplicate = bool(block.get("is_duplicate_drive") or block.get("is_duplicate_equipment"))
+    filter_result_index = max(1, int(block.get("duplicate_index") or 1)) if is_duplicate else 1
     refinement = map_drive_filter_refinement(
         [quality],
         sub_stats,
@@ -751,12 +759,14 @@ def map_drive_block_installation(
     controls = _scale_controls(DEFAULT_DRIVE_EQUIP_FIRST_RESULT, screen_size, content_rect)
     prompt = _scale_controls(DEFAULT_EQUIPMENT_REUSE_PROMPT, screen_size, content_rect)
     target_position = _drive_target_position(block, screen_size, content_rect)
+    source_drive = _drive_filter_result_position(filter_result_index, screen_size, content_rect)
     result: dict[str, Any] = {
         "block_id": block.get("block_id"),
         "drive_type": shape_selection["drive_type"],
         "set_name": set_name,
         "shape_option": shape_selection["shape_option"],
-        "first_drive": controls["first_drive"],
+        "first_drive": source_drive,
+        "filter_result_index": filter_result_index,
         "target_position": target_position,
         "confirm_filter": controls["confirm_filter"],
         "reuse_prompt_confirm": prompt["reuse_prompt_confirm"],
@@ -785,6 +795,7 @@ def map_drive_block_installation(
             "block_id": block.get("block_id"),
             "is_duplicate_drive": is_duplicate,
             "duplicate_index": block.get("duplicate_index"),
+            "filter_result_index": filter_result_index,
             "from": result["first_drive"],
             "to": result["target_position"],
             "duration_ms": duration_ms,
@@ -832,8 +843,8 @@ def map_drive_blocks_installation(
 ) -> dict[str, Any]:
     """Return a per-block drive assembly plan.
 
-    Each block is filtered and dragged independently so the first filtered
-    result always corresponds to the current blueprint block being installed.
+    Each block is filtered and dragged independently. Duplicate equipment uses
+    ``duplicate_index`` to pick the matching nth filtered result position.
     """
 
     page_controls = map_drive_page_controls(screen_size, content_rect)
@@ -916,6 +927,29 @@ def _drive_sub_stat_names(sub_stats: Any) -> list[str]:
     if isinstance(sub_stats, list):
         return [str(name).strip() for name in sub_stats if str(name).strip()]
     return []
+
+
+def _drive_filter_result_position(
+    result_index: int,
+    screen_size: tuple[int, int] | None = None,
+    content_rect: tuple[int, int, int, int] | None = None,
+) -> tuple[int, int]:
+    """Return the drag source for the nth visible drive in the filter result grid."""
+
+    index = max(1, int(result_index or 1)) - 1
+    grid = DEFAULT_DRIVE_FILTER_RESULT_GRID
+    columns = max(1, int(grid["columns"]))
+    origin_x, origin_y = grid["origin"]
+    column_step_x, column_step_y = grid["column_step"]
+    row_step_x, row_step_y = grid["row_step"]
+    row = index // columns
+    column = index % columns
+    point = (
+        origin_x + column * column_step_x + row * row_step_x,
+        origin_y + column * column_step_y + row * row_step_y,
+    )
+    scaled = _scale_controls({"result": point}, screen_size, content_rect)
+    return scaled["result"]
 
 
 def _drive_target_position(

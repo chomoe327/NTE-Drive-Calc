@@ -953,7 +953,16 @@ class DriveAssemblyBlockTests(unittest.TestCase):
             if step["name"] == "force_drag_first_drive_to_block"
         )
         self.assertEqual(
-            {"name": "force_drag_first_drive_to_block", "block_id": 3, "from": (126, 430), "to": (1205, 393), "duration_ms": 1200},
+            {
+                "name": "force_drag_first_drive_to_block",
+                "block_id": 3,
+                "is_duplicate_drive": False,
+                "duplicate_index": None,
+                "filter_result_index": 1,
+                "from": (126, 430),
+                "to": (1205, 393),
+                "duration_ms": 1200,
+            },
             install["install_sequence"][drag_index],
         )
         self.assertEqual({"name": "wait_for_equipment_reuse_prompt", "wait_seconds": 0.3}, install["install_sequence"][drag_index + 1])
@@ -989,6 +998,36 @@ class DriveAssemblyBlockTests(unittest.TestCase):
         self.assertIn("status_locked", sequence_names)
         self.assertIn("status_discarded", sequence_names)
         self.assertIn("status_other", sequence_names)
+
+    def test_duplicate_drive_block_installation_uses_nth_filter_result(self):
+        from src.features.drive_assembly.page_mapping import map_drive_block_installation
+
+        block = {
+            "block_id": 5,
+            "drive_type": "H_2",
+            "pixel_position": (1112, 362),
+            "is_duplicate_drive": True,
+            "duplicate_index": 2,
+            "drive": {"quality": "Gold", "sub_stats": {"暴击率%": 10.0, "伤害增加%": 2.0}},
+        }
+
+        install = map_drive_block_installation(block)
+        drag = next(step for step in install["install_sequence"] if step["name"] == "force_drag_first_drive_to_block")
+
+        self.assertEqual(2, install["filter_result_index"])
+        self.assertEqual((347, 430), install["first_drive"])
+        self.assertEqual((347, 430), drag["from"])
+        self.assertEqual(2, drag["filter_result_index"])
+
+    def test_drive_filter_result_positions_follow_four_column_grid(self):
+        from src.features.drive_assembly.page_mapping import _drive_filter_result_position
+
+        self.assertEqual((126, 430), _drive_filter_result_position(1))
+        self.assertEqual((347, 430), _drive_filter_result_position(2))
+        self.assertEqual((568, 430), _drive_filter_result_position(3))
+        self.assertEqual((789, 430), _drive_filter_result_position(4))
+        self.assertEqual((126, 589), _drive_filter_result_position(5))
+        self.assertEqual((789, 589), _drive_filter_result_position(8))
 
     def test_maps_drive_block_installation_from_cells_when_pixel_position_missing(self):
         from src.features.drive_assembly.page_mapping import map_drive_block_installation

@@ -654,6 +654,9 @@ def _drive_block_duplicate_log(action: dict[str, Any]) -> str:
     duplicate_index = action.get("duplicate_index")
     if duplicate_index:
         parts.append(f"副本序号={duplicate_index}")
+    filter_result_index = action.get("filter_result_index")
+    if filter_result_index:
+        parts.append(f"列表序号={filter_result_index}")
     return " | ".join(parts)
 
 
